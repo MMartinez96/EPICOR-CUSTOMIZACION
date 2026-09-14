@@ -2559,6 +2559,7 @@ public class Script
         }
     }
 
+            
 
 
     private void edvPartView_EpiViewNotification(EpiDataView view, EpiNotifyArgs args)
@@ -2603,4 +2604,14 @@ public class Script
                 break;
         }
     }
+}
+
+
+
+
+for(x=0; x<=1; x++){
+
+L.HookSoldItViews=n.Part_DataView.ListChanged(X.Convert);
+
+
 }

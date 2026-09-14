@@ -2,6 +2,7 @@
 // Custom code for JobEntryForm — incluye MOQ (CFXJZ) + SERIALIZADO
 // MOQ epguid: 96cf1f82-e55d-42ee-b41a-caf25e263ac1 (MOQTEXT)
 // Botón Serializado epguid: 7e3c0614-510b-4a31-983b-eb5c2ea2ef96
+// Botón Otros epguid: 2f2a467a-e961-4c65-b4a8-25951d78fb02
 // BAQ reutilizados: BAQPO, CODIFLEX-UD10, FT_BAQ, BAQCONSULTAVALIDACIONMUESTRA
 // v2: carga diferida JobHead + caché BAQ por sesión (abre Job Entry más rápido)
 // v2.1: orden_compra_c se llena al cambiar OrdenDeVenta_c + refresh UI (epguid b7fbb965...)
@@ -16,13 +17,45 @@
 // v3.0: Restaurar comentatiostx (desvComentario) por usuario; FT_BAQ al liberar job (Released)
 // v3.1: comentariosttt epguid 1c580add... (JobHead.desv_comentario_c); evita cuelgue SValdez
 // v3.2: comentariosttt multilínea (Enter = nueva línea) para planeadores autorizados
-// v3.3: FT corrida — confiar en FT_BAQ al programar/liberar job (no sobrescribir con qty x UD10)
+// v3.7: Rendimiento UD/render — evita BAQ repetidos, ocultar campos 1 vez, menos reintentos
 // v3.4: VALIDADO/NO VALIDADO — refresco en InitLastView/GetByID/cambio PartNum; lee Part.validare_c; invalida caché
 // v3.5: Consecutivo folios — columna Defectos en rollo en vista previa/impresión; botón Guardar PDF
 // v3.6: Serializado tab1 — prefijo grande editable (amarillo) + PO consulta destacada abajo
 // v3.6.1: Prefijo — textbox compacto (2 caracteres)
 // v3.6.2: Prefijo — borde visible, sin default J0 (usuario debe teclear)
 // v3.6.3: Prefijo — textbox limpio con borde 3D completo (sin marco partido)
+// v3.8: Botón Otros epguid 2f2a467a... — mismo serializado sin PO/prefijo; header azul degradado suave
+// v3.8.1: Otros — sin columna Prefijo en grid ni PO/Prefijo en impresión/vista previa/PDF
+// v3.9.2: No ocultar Fecha entrega / Fecha producción (UD); sin Height=0; mejor detección Customization
+// v3.9.3: Proteger Cliente (lblCliente/txtCustID_c Part.Cliente_c); HideAdjacentEditor sin afectar vecinos; rehide sin full scan
+// v3.10: FT estable — MakeToStockQty dispara cálculo UD10; FT_BAQ no pisa cantidad editada
+// v3.11: Al consultar/crear job siempre muestra FT = cantidad × UD10 si FT_BAQ vacío; lock solo al editar cantidad
+// v3.12: Consulta usa FT_BAQ primero (traveler); UD10 solo al editar cantidad; HasFtCorrida no invalida BAQ
+// v3.13: FT_BAQ siempre si hay JobNum; fórmula UD10 completa (no Number12 obsoleto); sin lock en carga
+// v3.14: FT solo si Make To Stock + Get Details; limpia si falta uno; consulta job con reintentos FT_BAQ
+// v3.15: Detecta ops/materiales y qty MTS en todas las filas; sin bucle Detail*; no congela Job Entry
+// v3.16: Consulta job programado repinta FT_BAQ; job nuevo limpia TOTAL FT CORRIDA
+// v3.17: FT solo al Guardar (Update) si MTS+Get Details; consulta solo FT_BAQ; sin auto-calc
+// v3.18: Consulta repinta FT tras layout Epicor; QueryFtBaQ por columna FT; limpia FT al teclear MTS
+// v3.19: Limpia FT al cambiar job (no arrastra anterior); BAQ consulta con reintentos y variantes JobNum
+// v3.20: FT auto al consultar job — reintentos escalonados sin cancelarse; sin depender de Refresh
+// v3.21: Consulta FT liviana — 1 timer + caché BAQ; sin tormenta de reintentos (Job Entry rápido)
+// v3.22: Repinta epiNumericEditorC1/epguid tras consulta; InitLastView = GetByID (sin Refresh)
+// v3.23: FT al terminar carga del job (ExecuteDeferredJobHeadLoad) — mismo momento que Refresh
+// v3.24: Consulta FT directa (BAQ + epiNumericEditorC1); restaura Refresh y carga de job
+// v3.25: Debounce consulta FT — ya no se cancela entre GetByID y carga diferida
+// v3.26: Consulta FT = patrón Job Tracker (FT_BAQ cache + row[0] → epiNumericEditorC1); sin debounce
+// v3.27: FT_BAQ copiado literal Job Tracker; GetByID; evita que Leave de cantidad borre FT al consultar
+// v3.28: GetByID difiere FT_BAQ (BeginInvoke); no cachea FT vacío/. ; repinta desde caché numérica
+// v3.29: Consulta job — limpia FT al cambiar job (GetByID); carga BAQ tras limpiar; no repinta FT de job anterior
+// v3.30: Consulta FT — limpia siempre; aplica vía GetFtCorridaControl; reintentos si Epicor aún no terminó GetByID
+// v3.31: RequestFtConsultForJob — árbol/lista (Initialize), GetByID, reintentos hasta ~3s; limpia al cambiar job
+// v3.32: FT más rápido — dedupe consultas, caché 1er intento, menos reintentos, sin FT duplicado en deferred
+// v3.33: PRIORIDAD (prioridades_c epguid 98cbb708...) — default NORMAL en job nuevo; limpia tras guardar
+// v3.34: PRIORIDAD visible — ValueList + reintentos tras Part/GetDetails; repinta combo EpiUltraCombo
+// v3.35: PRIORIDAD UI — reintentos solo si combo visible; Timer 300ms post-asignación (patrón BAQ Report)
+// v3.36: PRIORIDAD compile — EpiUltraCombo solo Value/Text (sin ValueList/SelectedIndex)
+// v3.37: PRIORIDAD — dataView en AddRow, ForceRefreshList, oTrans.Refresh, tras Part/adapter
 // **************************************************
 
 extern alias Erp_Contracts_BO_JobEntry;
@@ -36,6 +69,7 @@ using System.ComponentModel;
 using System.Data;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
 using System.Globalization;
 using System.IO;
@@ -83,18 +117,31 @@ public class Script
     private const string MoqPlantId = "CFXJZ";
 
     private const string SerializadoButtonEpGuid = "7e3c0614-510b-4a31-983b-eb5c2ea2ef96";
+    private const string OtrosButtonEpGuid = "2f2a467a-e961-4c65-b4a8-25951d78fb02";
     private const string OrdenCompraControlEpGuid = "b7fbb965-a54d-4161-a36e-323ebecff2c2";
     private const string FtCorridaControlEpGuid = "637e5ce4-606f-4cfe-9dfe-6c8698385599";
     private const string QuantityControlEpGuid = "c6c8b7d5-e166-4ef7-9dc1-8efcb608ddfa";
+    private const string MakeToStockQtyControlName = "MakeToStockQty";
     private const string DesvComentarioControlEpGuid = "1c580add-87b1-447a-8562-3446f310b347";
     private const string DesvComentarioControlName = "comentariosttt";
     private const string ValidacionParteControlEpGuid = "026fcb95-e8a6-42ed-b83f-26ffe9733ec8";
+    private const string ClienteControlEpGuid = "16cc37ea-d689-4411-995a-71b7194250f1";
+    private const string ClienteLabelControlName = "lblCliente";
+    private const string ClienteFieldControlName = "txtCustID_c";
     private const string ValidacionParteBaqName = "BAQVALIDARPART";
     private const string FtCorridaBaqName = "FT_BAQ";
+    private const string PrioridadControlEpGuid = "98cbb708-0d16-488f-b1da-04c4dbaa3538";
+    private const string PrioridadFieldName = "prioridades_c";
+    private const string PrioridadDefaultValue = "NORMAL";
     private Control _btnSerializado;
+    private Control _btnOtros;
     private Control _validacionParteControl;
     private Control _txtOrdenDeVenta;
     private Control _numQuantity;
+    private Control _makeToStockQty;
+    private Control _prioridadControl;
+    private EpiUltraCombo _cmbPrioridad;
+    private bool _prioridadClearAfterSave;
 
     private string _moqViolationHandledSig;
     private string _moqTrackedJobNum;
@@ -104,6 +151,7 @@ public class Script
     private string _pendingDeferredJobKey;
     private int _pendingDeferredRow = -1;
     private string _lastLoadedFtJobNum = string.Empty;
+    private string _ftConsultJobNum = string.Empty;
     private string _pendingFtDisplayValue = string.Empty;
     private bool _ftFieldApplyScheduled;
     private int _deferredFtGeneration;
@@ -112,14 +160,76 @@ public class Script
     private readonly List<Control> _quantityLeaveControls = new List<Control>();
     private Timer _ftQtyRefreshTimer;
     private int _ftQtyRefreshGeneration;
+    private int _ftRefreshWhenReadyGeneration;
+    private int _ftWatchGeneration;
+    private string _ftWatchExpectedJob = string.Empty;
+    private string _ftConsultInFlightJob = string.Empty;
+    private DateTime _ftSuppressClearUntilUtc = DateTime.MinValue;
     private decimal _pendingQtyMilForFt = -1m;
     private int _validacionRefreshGeneration;
     private string _pendingValidacionPart = string.Empty;
+    private string _lastDeferredJobLoadKey = string.Empty;
+    private bool _hiddenFieldsLayoutApplied;
+    private string _lastValidacionUiText = string.Empty;
+    private Color _lastValidacionUiBackColor = Color.Empty;
 
-    private const int MaxDeferredFtAttempts = 12;
-    private const int MaxValidacionRefreshAttempts = 6;
-    private const int MaxHiddenFieldApplyAttempts = 6;
+    private const int MaxFtConsultAttempts = 5;
+    private const int MaxDeferredFtAttempts = 4;
+    private const int MaxValidacionRefreshAttempts = 4;
+    private const int MaxHiddenFieldApplyAttempts = 2;
+    private const int MaxFtFieldApplyAttempts = 4;
     private const int MaxQuantityWireAttempts = 10;
+    private const int MaxPrioridadApplyAttempts = 12;
+
+    /// <summary>True mientras el diseñador de Form Customization está abierto.</summary>
+    private bool IsJobEntryCustomizationMode()
+    {
+        try
+        {
+            if (baseToolbarsManager != null && baseToolbarsManager.Tools != null)
+            {
+                string[] customizationToolKeys = new string[]
+                {
+                    "SaveCustomizationTool",
+                    "ExitCustomizationTool",
+                    "CancelCustomizationTool",
+                    "CustomizationTool"
+                };
+                for (int i = 0; i < customizationToolKeys.Length; i++)
+                {
+                    Infragistics.Win.UltraWinToolbars.ToolBase tool =
+                        baseToolbarsManager.Tools[customizationToolKeys[i]];
+                    if (tool != null && tool.SharedProps != null && tool.SharedProps.Visible)
+                        return true;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null)
+                return false;
+            string title = host.Text ?? string.Empty;
+            if (title.IndexOf("Customization", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            if (title.IndexOf("Personaliz", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    private bool ShouldRunRuntimeUiLogic()
+    {
+        return !IsJobEntryCustomizationMode();
+    }
 
     public void InitializeCustomCode()
     {
@@ -154,6 +264,7 @@ public class Script
                 _numQuantity = FindControlByName(JobEntryForm, "numQuantity");
             if (_numQuantity != null)
                 WireQuantityLeaveControl(_numQuantity);
+            WireMakeToStockQtyControl();
         }
         catch
         {
@@ -193,10 +304,24 @@ public class Script
         {
         }
 
+        try
+        {
+            _cmbPrioridad = csm.GetNativeControlReference(PrioridadControlEpGuid) as EpiUltraCombo;
+            if (_cmbPrioridad != null)
+                _prioridadControl = _cmbPrioridad;
+        }
+        catch
+        {
+        }
+
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
         ApplyDesvComentarioAccess();
         ApplyHiddenJobEntryFields();
         ScheduleApplyHiddenJobEntryFields(0);
         WireSerializadoButton();
+        WireOtrosButton();
         WireJobHeadColumnChanged();
         WireJobProdColumnChanged();
         WireOrdenVentaLeave();
@@ -255,12 +380,130 @@ public class Script
         return false;
     }
 
+    private static bool IsFechaEntregaClienteControlName(string normalizedName)
+    {
+        if (string.IsNullOrEmpty(normalizedName))
+            return false;
+        if (normalizedName.IndexOf("fechaentreacliente", StringComparison.Ordinal) >= 0)
+            return true;
+        if (normalizedName.IndexOf("fechaentregaclient", StringComparison.Ordinal) >= 0)
+            return true;
+        if (normalizedName.IndexOf("fechaentregacliente", StringComparison.Ordinal) >= 0)
+            return true;
+        if (normalizedName.IndexOf("labelfechaentrega", StringComparison.Ordinal) >= 0)
+            return true;
+        return normalizedName.IndexOf("fecha", StringComparison.Ordinal) >= 0
+            && normalizedName.IndexOf("cliente", StringComparison.Ordinal) >= 0
+            && (normalizedName.IndexOf("entrega", StringComparison.Ordinal) >= 0
+                || normalizedName.IndexOf("entreacliente", StringComparison.Ordinal) >= 0);
+    }
+
+    private static bool IsProtectedClienteControl(Control control)
+    {
+        if (control == null)
+            return false;
+
+        string n = NormalizeSearchText(control.Name);
+        if (IsFechaEntregaClienteControlName(n))
+            return false;
+
+        if (string.Equals(n, ClienteLabelControlName, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(n, ClienteFieldControlName, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (n.IndexOf("cliente_c", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n == "txtcustid" || n == "lblcliente")
+            return true;
+
+        string t = NormalizeSearchText(control.Text);
+        if (t == "cliente")
+            return true;
+
+        return false;
+    }
+
+    private static bool IsProtectedOperationalFieldControl(Control control)
+    {
+        if (control == null || IsProtectedClienteControl(control))
+            return true;
+        if (IsDesvComentarioControl(control) || IsProtectedCustomDateControl(control))
+            return true;
+
+        string n = NormalizeSearchText(control.Name);
+        if (n.IndexOf("ordencompra", StringComparison.Ordinal) >= 0
+            || n.IndexOf("orden_compra", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("ordendeventa", StringComparison.Ordinal) >= 0
+            || n.IndexOf("orden_de_venta", StringComparison.Ordinal) >= 0
+            || n == "txtordendeve")
+            return true;
+        if (n.IndexOf("validacionparte", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("epinumericeditorc1", StringComparison.Ordinal) >= 0
+            || n.IndexOf("lbaelft", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("moq", StringComparison.Ordinal) >= 0)
+            return true;
+
+        return false;
+    }
+
+    private static bool IsProtectedCustomDateControl(Control control)
+    {
+        if (control == null)
+            return false;
+        if (IsProtectedClienteControl(control))
+            return true;
+
+        string n = NormalizeSearchText(control.Name);
+        string t = NormalizeSearchText(control.Text);
+
+        if (n.IndexOf("fechaprod", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("fecha_prod", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("fechaentrega", StringComparison.Ordinal) >= 0
+            && n.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return true;
+        if (n.IndexOf("fecha_entrega", StringComparison.Ordinal) >= 0
+            && n.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return true;
+        if (t.IndexOf("fecha de produccion", StringComparison.Ordinal) >= 0)
+            return true;
+        if (t.IndexOf("fecha produccion", StringComparison.Ordinal) >= 0)
+            return true;
+        if (t.IndexOf("fecha entrega", StringComparison.Ordinal) >= 0
+            && t.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return true;
+        if (t.IndexOf("fecha de entrega", StringComparison.Ordinal) >= 0
+            && t.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return true;
+
+        return false;
+    }
+
     private static bool ShouldHideJobEntryFieldLabel(string labelText, Control control)
     {
         string t = NormalizeSearchText(labelText);
         if (t.Length == 0)
             return false;
+        if (IsProtectedClienteControl(control))
+            return false;
+        if (t == "cliente")
+            return false;
+        if (IsProtectedCustomDateControl(control))
+            return false;
         if (t.IndexOf("desviacion", StringComparison.Ordinal) >= 0)
+            return false;
+        if (t.IndexOf("fecha de produccion", StringComparison.Ordinal) >= 0)
+            return false;
+        if (t.IndexOf("fecha produccion", StringComparison.Ordinal) >= 0)
+            return false;
+        if (t.IndexOf("fecha entrega", StringComparison.Ordinal) >= 0
+            && t.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return false;
+        if (t.IndexOf("fecha de entrega", StringComparison.Ordinal) >= 0
+            && t.IndexOf("cliente", StringComparison.Ordinal) < 0)
             return false;
         if (t.IndexOf("fecha inspeccion", StringComparison.Ordinal) >= 0)
             return true;
@@ -284,15 +527,29 @@ public class Script
             return false;
         if (n.IndexOf("desvcomentario", StringComparison.Ordinal) >= 0)
             return false;
+        if (n.IndexOf("txtcustid", StringComparison.Ordinal) >= 0
+            || n == "lblcliente"
+            || n.IndexOf("cliente_c", StringComparison.Ordinal) >= 0)
+            return false;
         if (n.IndexOf("comentatiostx", StringComparison.Ordinal) >= 0)
             return false;
         if (n.IndexOf("comentariosttt", StringComparison.Ordinal) >= 0)
             return false;
+        if (n.IndexOf("fechaprod", StringComparison.Ordinal) >= 0)
+            return false;
+        if (n.IndexOf("fecha_prod", StringComparison.Ordinal) >= 0)
+            return false;
+        if (n.IndexOf("fechaentrega", StringComparison.Ordinal) >= 0
+            && n.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return false;
+        if (n.IndexOf("fecha_entrega", StringComparison.Ordinal) >= 0
+            && n.IndexOf("cliente", StringComparison.Ordinal) < 0)
+            return false;
+        if (IsFechaEntregaClienteControlName(n))
+            return true;
         if (n.IndexOf("fechainspe", StringComparison.Ordinal) >= 0)
             return true;
-        if (n.IndexOf("fechaentrega", StringComparison.Ordinal) >= 0)
-            return true;
-        if (n.IndexOf("entregacliente", StringComparison.Ordinal) >= 0)
+        if (n.IndexOf("labelfechainsp", StringComparison.Ordinal) >= 0)
             return true;
         if (n.IndexOf("comentarios_c", StringComparison.Ordinal) >= 0 && n.IndexOf("desv", StringComparison.Ordinal) < 0)
             return true;
@@ -317,14 +574,35 @@ public class Script
 
     private static void HideJobEntryControl(Control control)
     {
-        if (control == null || IsDesvComentarioControl(control))
+        if (control == null || IsProtectedOperationalFieldControl(control))
             return;
         control.Visible = false;
         control.Enabled = false;
-        try { control.Height = 0; } catch { }
         EpiTextBox tb = control as EpiTextBox;
         if (tb != null)
             tb.ReadOnly = true;
+    }
+
+    private static bool ShouldHideEditorForLabel(Control labelControl, Control editor)
+    {
+        if (labelControl == null || editor == null || IsProtectedOperationalFieldControl(editor))
+            return false;
+
+        string labelName = NormalizeSearchText(labelControl.Name);
+        string editorName = NormalizeSearchText(editor.Name);
+
+        if (labelName.IndexOf("fechainsp", StringComparison.Ordinal) >= 0
+            && editorName.IndexOf("fechainspe", StringComparison.Ordinal) >= 0)
+            return true;
+        if (labelName.IndexOf("fechaentrega", StringComparison.Ordinal) >= 0
+            && IsFechaEntregaClienteControlName(editorName))
+            return true;
+        if (labelName.IndexOf("comentario", StringComparison.Ordinal) >= 0
+            && editorName.IndexOf("comentario", StringComparison.Ordinal) >= 0
+            && editorName.IndexOf("desv", StringComparison.Ordinal) < 0)
+            return true;
+
+        return ShouldHideJobEntryFieldName(editor.Name);
     }
 
     private static void HideAdjacentEditor(Control labelControl)
@@ -339,11 +617,12 @@ public class Script
             for (int i = startIndex + 1; i < parent.Controls.Count; i++)
             {
                 Control candidate = parent.Controls[i];
-                if (IsLikelyBoundEditor(candidate) && !IsDesvComentarioControl(candidate))
-                {
-                    HideJobEntryControl(candidate);
-                    return;
-                }
+                if (!IsLikelyBoundEditor(candidate))
+                    continue;
+                if (!ShouldHideEditorForLabel(labelControl, candidate))
+                    continue;
+                HideJobEntryControl(candidate);
+                return;
             }
         }
 
@@ -355,7 +634,7 @@ public class Script
             Control sibling = parent.Controls[i];
             if (sibling == null || sibling == labelControl || !IsLikelyBoundEditor(sibling))
                 continue;
-            if (IsDesvComentarioControl(sibling))
+            if (!ShouldHideEditorForLabel(labelControl, sibling))
                 continue;
             int dist = Math.Abs(sibling.Top - labelTop) + Math.Abs(sibling.Left - labelControl.Left);
             if (dist < bestDist)
@@ -373,7 +652,7 @@ public class Script
         if (root == null)
             return;
 
-        if (IsDesvComentarioControl(root))
+        if (IsDesvComentarioControl(root) || IsProtectedCustomDateControl(root) || IsProtectedClienteControl(root))
             return;
 
         for (int i = 0; i < root.Controls.Count; i++)
@@ -393,12 +672,97 @@ public class Script
         }
     }
 
+    private void ResetHiddenFieldsLayoutCache()
+    {
+        _hiddenFieldsLayoutApplied = false;
+    }
+
     private void ApplyHiddenJobEntryFields()
     {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
         try
         {
-            HideJobEntryFieldsRecursive(JobEntryForm);
+            if (!_hiddenFieldsLayoutApplied)
+            {
+                HideJobEntryFieldsRecursive(JobEntryForm);
+                _hiddenFieldsLayoutApplied = true;
+            }
+            else
+                RehideKnownJobEntryFields();
+
+            EnsureProtectedJobEntryFieldsVisible();
             ApplyDesvComentarioAccess();
+        }
+        catch
+        {
+        }
+    }
+
+    private void RehideKnownJobEntryFields()
+    {
+        if (!ShouldRunRuntimeUiLogic() || JobEntryForm == null)
+            return;
+
+        try
+        {
+            string[] hideByName = new string[]
+            {
+                "fechainspeccionjob", "labelfechainsp",
+                "fechaentreacliente", "labelfechaentrega"
+            };
+            for (int i = 0; i < hideByName.Length; i++)
+            {
+                Control c = FindControlByName(JobEntryForm, hideByName[i]);
+                if (c == null)
+                    continue;
+                if (ShouldHideJobEntryFieldName(c.Name) || ShouldHideJobEntryFieldLabel(c.Text, c))
+                    HideJobEntryControl(c);
+            }
+
+            Control lblEntrega = FindControlByName(JobEntryForm, "labelfechaentrega");
+            if (lblEntrega != null && ShouldHideJobEntryFieldLabel(lblEntrega.Text, lblEntrega))
+            {
+                HideJobEntryControl(lblEntrega);
+                HideAdjacentEditor(lblEntrega);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void EnsureProtectedJobEntryFieldsVisible()
+    {
+        if (!ShouldRunRuntimeUiLogic() || JobEntryForm == null)
+            return;
+
+        try
+        {
+            Control[] pinned = new Control[]
+            {
+                csm.GetNativeControlReference(ClienteControlEpGuid) as Control,
+                FindControlByName(JobEntryForm, ClienteFieldControlName),
+                FindControlByName(JobEntryForm, ClienteLabelControlName),
+                FindControlByName(JobEntryForm, "txtordenDeVenta"),
+                FindControlByName(JobEntryForm, "lblOrdenDeVenta"),
+                csm.GetNativeControlReference(OrdenCompraControlEpGuid) as Control,
+                csm.GetNativeControlReference(FtCorridaControlEpGuid) as Control,
+                csm.GetNativeControlReference(ValidacionParteControlEpGuid) as Control,
+                GetPrioridadControl(),
+                FindControlByName(JobEntryForm, "fechaprodjob"),
+                FindControlByName(JobEntryForm, "labelfechaprod")
+            };
+
+            for (int i = 0; i < pinned.Length; i++)
+            {
+                Control c = pinned[i];
+                if (c == null || c.IsDisposed)
+                    continue;
+                if (!c.Visible)
+                    c.Visible = true;
+            }
         }
         catch
         {
@@ -407,6 +771,9 @@ public class Script
 
     private void ScheduleApplyHiddenJobEntryFields(int attempt)
     {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
         if (attempt < 0 || attempt >= MaxHiddenFieldApplyAttempts)
             return;
 
@@ -421,6 +788,24 @@ public class Script
                 try
                 {
                     ApplyHiddenJobEntryFields();
+                    if (edvJobHead != null && edvJobHead.Row >= 0)
+                    {
+                        string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+                        if (!string.IsNullOrWhiteSpace(jobNum)
+                            && string.Equals(_lastLoadedFtJobNum, jobNum.Trim(), StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(_ftWatchExpectedJob, jobNum.Trim(), StringComparison.OrdinalIgnoreCase)
+                            && IsUsableFtBaQDisplay(_pendingFtDisplayValue))
+                        {
+                            TryApplyFtCorridaField(_pendingFtDisplayValue);
+                            if (!HasFtCorridaDisplayValue())
+                            {
+                                string cachedFt;
+                                if (JobEntryBaqCache.TryGetFtBaQ(jobNum.Trim(), out cachedFt)
+                                    && !string.IsNullOrWhiteSpace(cachedFt))
+                                    RepaintFtCorridaFromCache(jobNum.Trim());
+                            }
+                        }
+                    }
                     if (attempt + 1 < MaxHiddenFieldApplyAttempts)
                         ScheduleApplyHiddenJobEntryFields(attempt + 1);
                 }
@@ -547,11 +932,27 @@ public class Script
 
             _numQuantity = ctrl;
             WireQuantityLeaveControl(ctrl);
+            WireMakeToStockQtyControl();
             return true;
         }
         catch
         {
             return false;
+        }
+    }
+
+    private void WireMakeToStockQtyControl()
+    {
+        try
+        {
+            if (_makeToStockQty == null || _makeToStockQty.IsDisposed)
+                _makeToStockQty = FindControlByName(JobEntryForm, MakeToStockQtyControlName);
+            if (_makeToStockQty == null)
+                return;
+            WireQuantityLeaveControl(_makeToStockQty);
+        }
+        catch
+        {
         }
     }
 
@@ -629,35 +1030,20 @@ public class Script
         ScheduleRefreshFtFromQuantity(-1m);
     }
 
+    private void SuppressFtClearDuringJobLoad()
+    {
+        _ftSuppressClearUntilUtc = DateTime.UtcNow.AddSeconds(5);
+    }
+
     private void ScheduleRefreshFtFromQuantity(decimal capturedQtyMil)
     {
         if (capturedQtyMil > 0m)
             _pendingQtyMilForFt = capturedQtyMil;
-
-        _ftQtyRefreshGeneration++;
-        int generation = _ftQtyRefreshGeneration;
-
-        try
-        {
-            Form host = JobEntryForm;
-            if (host == null || host.IsDisposed)
-                return;
-
-            if (_ftQtyRefreshTimer == null)
-            {
-                _ftQtyRefreshTimer = new Timer();
-                _ftQtyRefreshTimer.Interval = 120;
-                _ftQtyRefreshTimer.Tick += FtQtyRefreshTimer_Tick;
-            }
-
-            _ftQtyRefreshTimer.Stop();
-            _ftQtyRefreshTimer.Tag = generation;
-            _ftQtyRefreshTimer.Start();
-        }
-        catch
-        {
-            RefreshFtCorridaNow();
-        }
+        // No borrar FT mientras carga/consulta job (Leave de cantidad dispara al abrir job)
+        if (DateTime.UtcNow < _ftSuppressClearUntilUtc)
+            return;
+        // v3.18: no calcular al teclear MTS; limpiar FT hasta Guardar (no durante carga de job)
+        ClearFtCorridaField();
     }
 
     private void FtQtyRefreshTimer_Tick(object sender, EventArgs e)
@@ -670,42 +1056,29 @@ public class Script
         catch
         {
         }
-        RefreshFtCorridaNow();
     }
 
     private void RefreshFtCorridaNow()
     {
-        RefreshFtCorridaNow(false);
+        RefreshFtCorridaUnified();
     }
 
     private void RefreshFtCorridaAfterRelease()
     {
-        RefreshFtCorridaFromBaQOnly();
+        RefreshFtCorridaUnified();
     }
 
     private void RefreshFtCorridaFromBaQOnly()
     {
-        try
-        {
-            TryCommitQuantityEdits();
-            if (edvJobHead == null || edvJobHead.Row < 0)
-                return;
-
-            string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
-            if (string.IsNullOrWhiteSpace(jobNum))
-                return;
-
-            JobEntryBaqCache.InvalidateFtBaQ(jobNum);
-            _lastLoadedFtJobNum = string.Empty;
-            TryLoadFtCorrida(edvJobHead, edvJobHead.Row, true);
-            ScheduleDeferredFtLoad(edvJobHead, edvJobHead.Row, 1);
-        }
-        catch
-        {
-        }
+        RefreshFtCorridaUnified();
     }
 
-    private void RefreshFtCorridaNow(bool preferBaQFirst)
+    private void RefreshFtCorridaUnified()
+    {
+        RefreshFtCorridaUnified(-1m);
+    }
+
+    private void RefreshFtCorridaUnified(decimal preferredQtyMil)
     {
         try
         {
@@ -713,34 +1086,577 @@ public class Script
             if (edvJobHead == null || edvJobHead.Row < 0)
                 return;
 
-            if (preferBaQFirst || ShouldUseFtBaQAsSource())
-            {
-                RefreshFtCorridaFromBaQOnly();
-                if (HasFtCorridaDisplayValue())
-                    return;
-            }
+            decimal readyQtyMil;
+            if (!IsFtCalculationReady(out readyQtyMil))
+                return;
 
-            decimal forcedQty = _pendingQtyMilForFt;
-            _pendingQtyMilForFt = -1m;
+            decimal forcedQty = preferredQtyMil;
+            if (forcedQty <= 0m && _pendingQtyMilForFt > 0m)
+            {
+                forcedQty = _pendingQtyMilForFt;
+                _pendingQtyMilForFt = -1m;
+            }
+            if (forcedQty <= 0m)
+                forcedQty = readyQtyMil;
 
             string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+            string partNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+
             if (!string.IsNullOrWhiteSpace(jobNum))
+            {
                 JobEntryBaqCache.InvalidateFtBaQ(jobNum);
+                _lastLoadedFtJobNum = string.Empty;
+                string ftFromBaQ = QueryFtBaQ(jobNum);
+                if (!IsStaleFtCacheValue(ftFromBaQ))
+                {
+                    JobEntryBaqCache.SetFtBaQ(jobNum, ftFromBaQ);
+                    SetFtCorridaField(ftFromBaQ);
+                    _lastLoadedFtJobNum = jobNum;
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(partNum))
+                JobEntryBaqCache.InvalidateFtPerMill(partNum);
 
             if (forcedQty > 0m && TryCalculateAndSetFtCorrida(forcedQty))
                 return;
-            if (TryCalculateAndSetFtCorrida())
-                return;
+            TryCalculateAndSetFtCorrida();
+        }
+        catch
+        {
+        }
+    }
 
-            if (!string.IsNullOrWhiteSpace(jobNum))
+    private void ClearFtCorridaField()
+    {
+        _lastLoadedFtJobNum = string.Empty;
+        _pendingFtDisplayValue = string.Empty;
+        SetFtCorridaField(string.Empty);
+    }
+
+    private void ForceClearFtCorridaUi()
+    {
+        _lastLoadedFtJobNum = string.Empty;
+        _ftConsultJobNum = string.Empty;
+        _pendingFtDisplayValue = string.Empty;
+        try
+        {
+            Control c = GetFtCorridaControl();
+            if (c != null)
             {
-                _lastLoadedFtJobNum = string.Empty;
-                TryLoadFtCorrida(edvJobHead, edvJobHead.Row, true);
+                EpiNumericEditor ne = c as EpiNumericEditor;
+                if (ne != null)
+                {
+                    ne.Value = null;
+                    ne.Text = string.Empty;
+                    ne.Refresh();
+                    return;
+                }
+
+                c.Text = string.Empty;
+                c.Refresh();
+                return;
             }
         }
         catch
         {
         }
+
+        try
+        {
+            epiNumericEditorC1.Value = null;
+            epiNumericEditorC1.Text = string.Empty;
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>Copia literal de Job Tracker FT_BAQ — epiNumericEditorC1.Text = row[0].</summary>
+    private static bool IsUsableFtBaQDisplay(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+        string t = value.Trim();
+        return t.Length > 0 && !string.Equals(t, ".", StringComparison.Ordinal);
+    }
+
+    private void FT_BAQ(string jobnum)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(jobnum))
+                return;
+
+            jobnum = jobnum.Trim();
+            string cached;
+            if (JobEntryBaqCache.TryGetFtBaQ(jobnum, out cached) && IsUsableFtBaQDisplay(cached))
+            {
+                ApplyFtBaQToControl(jobnum, cached);
+                return;
+            }
+
+            using (DynamicQueryAdapter adapterDynamicQuery = new DynamicQueryAdapter(this.oTrans))
+            {
+                adapterDynamicQuery.BOConnect();
+                string BAQName = "FT_BAQ";
+                Ice.BO.QueryExecutionDataSet ds = new Ice.BO.QueryExecutionDataSet();
+                ds.ExecutionParameter.AddExecutionParameterRow("JOBNUM", jobnum, "nvarchar", false, Guid.Empty, "A");
+                adapterDynamicQuery.ExecuteByID(BAQName, ds);
+                string Part1 = string.Empty;
+                if (adapterDynamicQuery.QueryResults.Tables["Results"].Rows.Count > 0)
+                    Part1 = adapterDynamicQuery.QueryResults.Tables["Results"].Rows[0][0].ToString();
+
+                if (IsUsableFtBaQDisplay(Part1))
+                {
+                    JobEntryBaqCache.SetFtBaQ(jobnum, Part1.Trim());
+                    ApplyFtBaQToControl(jobnum, Part1.Trim());
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ExceptionBox.Show(ex);
+        }
+    }
+
+    private void ApplyFtBaQToControl(string jobnum, string ftText)
+    {
+        if (string.IsNullOrWhiteSpace(jobnum) || !IsUsableFtBaQDisplay(ftText))
+            return;
+
+        ftText = ftText.Trim();
+        jobnum = jobnum.Trim();
+        SuppressFtClearDuringJobLoad();
+        _pendingFtDisplayValue = ftText;
+        _ftConsultJobNum = jobnum;
+        _lastLoadedFtJobNum = jobnum;
+
+        EnsureProtectedJobEntryFieldsVisible();
+        if (!TryApplyFtCorridaField(ftText))
+        {
+            try
+            {
+                epiNumericEditorC1.Text = ftText;
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private void FT_BAQ(string jobnum, bool forceReload)
+    {
+        if (!string.IsNullOrWhiteSpace(jobnum) && forceReload)
+            JobEntryBaqCache.InvalidateFtBaQ(jobnum.Trim());
+        FT_BAQ(jobnum);
+    }
+
+    /// <summary>Consulta FT para job existente — limpia job anterior, BAQ + reintentos (árbol, GetByID, Refresh).</summary>
+    private void RequestFtConsultForJob(string jobNum)
+    {
+        RequestFtConsultForJob(jobNum, false);
+    }
+
+    private void RequestFtConsultForJob(string jobNum, bool forceRefresh)
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        if (string.IsNullOrWhiteSpace(jobNum))
+        {
+            ResetFtCorridaForNewJob();
+            return;
+        }
+
+        jobNum = jobNum.Trim();
+
+        if (!forceRefresh
+            && string.Equals(_ftWatchExpectedJob, jobNum, StringComparison.OrdinalIgnoreCase)
+            && HasFtCorridaDisplayValueForJob(jobNum))
+            return;
+
+        if (!forceRefresh
+            && string.Equals(_ftConsultInFlightJob, jobNum, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (!string.Equals(_lastLoadedFtJobNum, jobNum, StringComparison.OrdinalIgnoreCase))
+            ForceClearFtCorridaUi();
+
+        _ftWatchExpectedJob = jobNum;
+        _ftConsultInFlightJob = jobNum;
+        _ftWatchGeneration++;
+        RunFtConsultAttempt(jobNum, _ftWatchGeneration, 0);
+    }
+
+    private void ClearFtConsultInFlight(string jobNum)
+    {
+        if (string.IsNullOrWhiteSpace(jobNum))
+            return;
+        if (string.Equals(_ftConsultInFlightJob, jobNum.Trim(), StringComparison.OrdinalIgnoreCase))
+            _ftConsultInFlightJob = string.Empty;
+    }
+
+    private void LoadFtCorridaOnJobConsult(string jobNum)
+    {
+        RequestFtConsultForJob(jobNum, true);
+    }
+
+    private void RunFtConsultAttempt(string expectedJob, int generation, int attempt)
+    {
+        if (generation != _ftWatchGeneration)
+            return;
+
+        if (attempt < 0 || attempt >= MaxFtConsultAttempts)
+            return;
+
+        try
+        {
+            Form host = JobEntryForm;
+            MethodInvoker work = delegate
+            {
+                if (generation != _ftWatchGeneration)
+                    return;
+
+                string targetJob = expectedJob;
+                if (edvJobHead != null && edvJobHead.Row >= 0)
+                {
+                    string currentJob = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+                    if (!string.IsNullOrWhiteSpace(currentJob))
+                        targetJob = currentJob.Trim();
+                }
+
+                if (string.IsNullOrWhiteSpace(targetJob))
+                {
+                    ScheduleNextFtConsultAttempt(expectedJob, generation, attempt);
+                    return;
+                }
+
+                if (!string.Equals(targetJob, expectedJob, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                if (!string.Equals(_lastLoadedFtJobNum, targetJob, StringComparison.OrdinalIgnoreCase))
+                    ForceClearFtCorridaUi();
+
+                SuppressFtClearDuringJobLoad();
+                EnsureProtectedJobEntryFieldsVisible();
+                FT_BAQ(targetJob, attempt > 0);
+
+                if (HasFtCorridaDisplayValueForJob(targetJob))
+                {
+                    ClearFtConsultInFlight(targetJob);
+                    return;
+                }
+
+                ScheduleNextFtConsultAttempt(expectedJob, generation, attempt);
+            };
+
+            if (attempt == 0)
+                work();
+            else if (host != null && !host.IsDisposed && host.IsHandleCreated)
+                host.BeginInvoke(work);
+            else
+                work();
+        }
+        catch
+        {
+        }
+    }
+
+    private void ScheduleNextFtConsultAttempt(string expectedJob, int generation, int attempt)
+    {
+        if (generation != _ftWatchGeneration)
+            return;
+
+        if (attempt + 1 >= MaxFtConsultAttempts)
+        {
+            ClearFtConsultInFlight(expectedJob);
+            return;
+        }
+
+        Timer retryTimer = new Timer();
+        retryTimer.Interval = Math.Min(180 + ((attempt + 1) * 180), 900);
+        retryTimer.Tick += delegate(object s, EventArgs ev)
+        {
+            retryTimer.Stop();
+            retryTimer.Dispose();
+            RunFtConsultAttempt(expectedJob, generation, attempt + 1);
+        };
+        retryTimer.Start();
+    }
+
+    private bool HasFtCorridaDisplayValueForJob(string jobNum)
+    {
+        if (string.IsNullOrWhiteSpace(jobNum))
+            return false;
+
+        if (!string.Equals(_lastLoadedFtJobNum, jobNum.Trim(), StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return HasFtCorridaDisplayValue();
+    }
+
+    private void RepaintFtCorridaFromCache(string jobNum)
+    {
+        if (string.IsNullOrWhiteSpace(jobNum))
+            return;
+
+        string cached;
+        if (!JobEntryBaqCache.TryGetFtBaQ(jobNum.Trim(), out cached) || !IsUsableFtBaQDisplay(cached))
+            return;
+
+        ApplyFtBaQToControl(jobNum.Trim(), cached.Trim());
+    }
+
+    private void ResetFtCorridaForNewJob()
+    {
+        _deferredFtGeneration++;
+        _ftRefreshWhenReadyGeneration++;
+        _ftWatchGeneration++;
+        _ftWatchExpectedJob = string.Empty;
+        _ftConsultInFlightJob = string.Empty;
+        _lastLoadedFtJobNum = string.Empty;
+        _ftConsultJobNum = string.Empty;
+        _pendingFtDisplayValue = string.Empty;
+        _pendingQtyMilForFt = -1m;
+        ForceClearFtCorridaUi();
+    }
+
+    private void ScheduleCalculateFtOnSave(int attempt)
+    {
+        if (attempt < 0 || attempt >= MaxDeferredFtAttempts)
+            return;
+
+        _ftRefreshWhenReadyGeneration++;
+        int generation = _ftRefreshWhenReadyGeneration;
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed)
+                return;
+
+            MethodInvoker work = delegate
+            {
+                try
+                {
+                    if (generation != _ftRefreshWhenReadyGeneration)
+                        return;
+                    if (edvJobHead == null || edvJobHead.Row < 0)
+                        return;
+
+                    TryCommitQuantityEdits();
+
+                    decimal qtyMil;
+                    if (!IsFtCalculationReady(out qtyMil))
+                    {
+                        if (attempt + 1 < MaxDeferredFtAttempts)
+                            ScheduleCalculateFtOnSave(attempt + 1);
+                        return;
+                    }
+
+                    string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+                    if (!string.IsNullOrWhiteSpace(jobNum))
+                    {
+                        JobEntryBaqCache.InvalidateFtBaQ(jobNum);
+                        _lastLoadedFtJobNum = string.Empty;
+                    }
+
+                    RefreshFtCorridaUnified(qtyMil);
+                    ScheduleApplyFtCorridaField(0);
+                }
+                catch
+                {
+                }
+            };
+
+            if (!host.IsHandleCreated)
+                return;
+
+            if (attempt == 0)
+            {
+                host.BeginInvoke(work);
+                return;
+            }
+
+            Timer retryTimer = new Timer();
+            retryTimer.Interval = Math.Min(250 + (attempt * 150), 1200);
+            retryTimer.Tick += delegate(object s, EventArgs ev)
+            {
+                retryTimer.Stop();
+                retryTimer.Dispose();
+                if (host.IsDisposed || generation != _ftRefreshWhenReadyGeneration)
+                    return;
+                host.BeginInvoke(work);
+            };
+            retryTimer.Start();
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>Get Details aplicado: JobEngineered/Released o tiene operaciones/materiales en el job.</summary>
+    private bool HasGetDetailsApplied()
+    {
+        if (IsCurrentJobEngineered() || IsCurrentJobReleased())
+            return true;
+        return HasJobOperRows() || HasJobMtlRows();
+    }
+
+    private bool HasJobOperRows()
+    {
+        string[] viewNames = new string[] { "JobOper", "JobOpDtl", "JobAsmOper" };
+        for (int v = 0; v < viewNames.Length; v++)
+        {
+            if (CountEpiDataViewRows(viewNames[v]) > 0)
+                return true;
+        }
+        return false;
+    }
+
+    private bool HasJobMtlRows()
+    {
+        string[] viewNames = new string[] { "JobMtl", "JobMaterial" };
+        for (int v = 0; v < viewNames.Length; v++)
+        {
+            if (CountEpiDataViewRows(viewNames[v]) > 0)
+                return true;
+        }
+        return false;
+    }
+
+    private int CountEpiDataViewRows(string viewName)
+    {
+        try
+        {
+            if (!oTrans.EpiDataViews.ContainsKey(viewName))
+                return 0;
+            EpiDataView view = (EpiDataView)oTrans.EpiDataViews[viewName];
+            if (view == null || view.dataView == null)
+                return 0;
+
+            int count = 0;
+            for (int i = 0; i < view.dataView.Count; i++)
+            {
+                if (view.dataView[i].Row.RowState == DataRowState.Deleted)
+                    continue;
+                count++;
+            }
+            if (count > 0)
+                return count;
+
+            if (view.dataView.Table != null)
+            {
+                for (int r = 0; r < view.dataView.Table.Rows.Count; r++)
+                {
+                    if (view.dataView.Table.Rows[r].RowState == DataRowState.Deleted)
+                        continue;
+                    count++;
+                }
+            }
+            return count;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private bool TryGetMakeToStockQtyMil(out decimal qtyMil)
+    {
+        qtyMil = 0m;
+        try
+        {
+            WireMakeToStockQtyControl();
+            if (_makeToStockQty != null && TryReadQuantityFromControl(_makeToStockQty, out qtyMil))
+                return true;
+
+            if (_numQuantity != null && TryReadQuantityFromControl(_numQuantity, out qtyMil))
+                return true;
+
+            if (edvJobProd != null && edvJobProd.dataView != null && edvJobProd.dataView.Table != null)
+            {
+                string[] cols = new string[] { "RequiredQty", "BaseRequiredQty", "Quantity", "ProdQty" };
+
+                if (edvJobProd.Row >= 0 && TryReadJobProdQtyAtRow(edvJobProd.Row, cols, out qtyMil))
+                    return true;
+
+                for (int r = 0; r < edvJobProd.dataView.Count; r++)
+                {
+                    if (TryReadJobProdQtyAtRow(r, cols, out qtyMil))
+                        return true;
+                }
+
+                DataTable table = edvJobProd.dataView.Table;
+                for (int r = 0; r < table.Rows.Count; r++)
+                {
+                    if (table.Rows[r].RowState == DataRowState.Deleted)
+                        continue;
+                    for (int i = 0; i < cols.Length; i++)
+                    {
+                        if (!table.Columns.Contains(cols[i]))
+                            continue;
+                        object v = table.Rows[r][cols[i]];
+                        if (v != null && v != DBNull.Value
+                            && TryParseDecimalFlexible(v.ToString(), out qtyMil) && qtyMil > 0m)
+                            return true;
+                    }
+                }
+            }
+
+            if (HasGetDetailsApplied() && edvJobHead != null && edvJobHead.Row >= 0)
+            {
+                object v = edvJobHead.dataView[edvJobHead.Row]["ProdQty"];
+                if (v != null && v != DBNull.Value
+                    && TryParseDecimalFlexible(v.ToString(), out qtyMil) && qtyMil > 0m)
+                    return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    private bool TryReadJobProdQtyAtRow(int rowIndex, string[] cols, out decimal qtyMil)
+    {
+        qtyMil = 0m;
+        try
+        {
+            if (edvJobProd == null || edvJobProd.dataView == null || edvJobProd.dataView.Table == null)
+                return false;
+            if (rowIndex < 0 || rowIndex >= edvJobProd.dataView.Count)
+                return false;
+
+            for (int i = 0; i < cols.Length; i++)
+            {
+                if (!edvJobProd.dataView.Table.Columns.Contains(cols[i]))
+                    continue;
+                object v = edvJobProd.dataView[rowIndex][cols[i]];
+                if (v != null && v != DBNull.Value
+                    && TryParseDecimalFlexible(v.ToString(), out qtyMil) && qtyMil > 0m)
+                    return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    private bool IsFtCalculationReady(out decimal qtyMil)
+    {
+        qtyMil = 0m;
+        if (!HasGetDetailsApplied())
+            return false;
+        return TryGetMakeToStockQtyMil(out qtyMil);
+    }
+
+    private void RefreshFtCorridaNow(bool preferBaQFirst)
+    {
+        RefreshFtCorridaUnified();
     }
 
     private static bool IsProposedBooleanTrue(object value)
@@ -828,8 +1744,20 @@ public class Script
 
     private void TryCommitQuantityEdits()
     {
+        TryCommitJobHeadUiEdits();
+    }
+
+    private void TryCommitJobHeadUiEdits()
+    {
         try
         {
+            Form host = JobEntryForm;
+            if (host != null && !host.IsDisposed)
+            {
+                host.Validate();
+                if (host.ActiveControl != null)
+                    host.ActiveControl.Update();
+            }
             if (edvJobHead != null && edvJobHead.Row >= 0 && edvJobHead.dataView != null)
                 edvJobHead.dataView[edvJobHead.Row].EndEdit();
             if (edvJobProd != null && edvJobProd.Row >= 0 && edvJobProd.dataView != null)
@@ -864,11 +1792,10 @@ public class Script
     {
         try
         {
-            Control c = epiNumericEditorC1 as Control;
+            Control c = GetFtCorridaControl();
             if (c == null)
-                c = csm.GetNativeControlReference(FtCorridaControlEpGuid);
-            if (c == null)
-                return false;
+                return !string.IsNullOrWhiteSpace(_pendingFtDisplayValue)
+                    && !string.Equals(_pendingFtDisplayValue.Trim(), ".", StringComparison.Ordinal);
 
             EpiNumericEditor ne = c as EpiNumericEditor;
             string text = ne != null ? ne.Text : c.Text;
@@ -876,25 +1803,46 @@ public class Script
                 return false;
 
             decimal d;
-            if (!TryParseDecimalFlexible(text, out d) || d <= 0m)
-                return false;
-
-            if (edvJobHead == null || edvJobHead.Row < 0)
-                return true;
-
-            decimal qtyMil;
-            string partNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
-            decimal ftPerMill = 0m;
-            if (!string.IsNullOrWhiteSpace(partNum))
-                ftPerMill = QueryFtPerMillFromUd10(partNum);
-            if (ftPerMill > 0m && TryGetQuantityMilForFt(out qtyMil))
-                return IsPlausibleFtResult(d, qtyMil, ftPerMill);
-
-            return d >= 10m;
+            return TryParseDecimalFlexible(text, out d) && d > 0m;
         }
         catch
         {
             return false;
+        }
+    }
+
+    private Control GetFtCorridaControl()
+    {
+        try
+        {
+            Control c = csm.GetNativeControlReference(FtCorridaControlEpGuid) as Control;
+            if (c == null)
+                c = epiNumericEditorC1 as Control;
+            if (c == null)
+                c = FindControlByName(JobEntryForm, "epiNumericEditorC1");
+            return c;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private string GetFtCorridaControlText()
+    {
+        try
+        {
+            Control c = GetFtCorridaControl();
+            if (c == null)
+                return string.Empty;
+            EpiNumericEditor ne = c as EpiNumericEditor;
+            if (ne != null)
+                return ne.Text == null ? string.Empty : ne.Text.Trim();
+            return c.Text == null ? string.Empty : c.Text.Trim();
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 
@@ -903,13 +1851,16 @@ public class Script
         qtyMil = 0m;
         try
         {
+            if (_makeToStockQty != null && TryReadQuantityFromControl(_makeToStockQty, out qtyMil))
+                return true;
+
             if (_numQuantity != null && TryReadQuantityFromControl(_numQuantity, out qtyMil))
                 return true;
 
             if (edvJobProd != null && edvJobProd.Row >= 0
                 && edvJobProd.dataView != null && edvJobProd.dataView.Table != null)
             {
-                string[] cols = new string[] { "RequiredQty", "BaseRequiredQty", "Quantity" };
+                string[] cols = new string[] { "RequiredQty", "BaseRequiredQty", "Quantity", "ProdQty" };
                 for (int i = 0; i < cols.Length; i++)
                 {
                     if (!edvJobProd.dataView.Table.Columns.Contains(cols[i]))
@@ -983,10 +1934,10 @@ public class Script
 
     private static decimal ResolveFtPerMillFromUd10Row(DataRow row, DataTable table)
     {
-        decimal ftPerMill = ReadUd10Number12Strict(row, table);
-        if (ftPerMill > 0m)
-            return ftPerMill;
-        return ComputeFtPerMillFromUd10Row(row, table);
+        decimal computed = ComputeFtPerMillFromUd10Row(row, table);
+        if (computed > 0m)
+            return computed;
+        return ReadUd10Number12Strict(row, table);
     }
 
     private static decimal ComputeFtPerMillFromUd10Row(DataRow row, DataTable table)
@@ -1090,11 +2041,15 @@ public class Script
         if (edvJobHead == null || edvJobHead.Row < 0)
             return false;
 
+        decimal readyQty;
+        if (!IsFtCalculationReady(out readyQty))
+            return false;
+
         string partNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
         string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
         decimal qtyMil = forcedQtyMil;
-        if (qtyMil <= 0m && !TryGetQuantityMilForFt(out qtyMil))
-            return false;
+        if (qtyMil <= 0m && !TryGetMakeToStockQtyMil(out qtyMil))
+            qtyMil = readyQty;
         if (string.IsNullOrWhiteSpace(partNum) || qtyMil <= 0m)
             return false;
 
@@ -1206,9 +2161,7 @@ public class Script
             decimal qty = 0m;
             if (e.ProposedValue != null && e.ProposedValue != DBNull.Value
                 && TryParseDecimalFlexible(Convert.ToString(e.ProposedValue), out qty) && qty > 0m)
-                ScheduleRefreshFtFromQuantity(qty);
-            else
-                ScheduleRefreshFtFromQuantity();
+                _pendingQtyMilForFt = qty;
         }
         catch
         {
@@ -1228,7 +2181,16 @@ public class Script
 
             if (string.Equals(e.Column.ColumnName, "JobNum", StringComparison.OrdinalIgnoreCase))
             {
-                TryLoadFtCorrida(edvJobHead, edvJobHead.Row, true);
+                string proposedJob = e.ProposedValue == null || e.ProposedValue == DBNull.Value
+                    ? string.Empty
+                    : e.ProposedValue.ToString().Trim();
+                if (string.IsNullOrWhiteSpace(proposedJob))
+                {
+                    ResetFtCorridaForNewJob();
+                    ScheduleApplyPrioridadDefaultForNewJob(0);
+                }
+                else
+                    LoadFtCorridaOnJobConsult(proposedJob);
                 return;
             }
 
@@ -1240,36 +2202,30 @@ public class Script
                 if (string.IsNullOrWhiteSpace(part))
                 {
                     ApplyValidacionParteUi(string.Empty);
+                    SetFtCorridaField(string.Empty);
                     return;
                 }
 
                 JobEntryBaqCache.InvalidateValidacionParte(part);
+                JobEntryBaqCache.InvalidateFtPerMill(part);
                 ScheduleRefreshValidacionParte(part, 0);
+                if (IsNewJobContext())
+                    ScheduleApplyPrioridadDefaultForNewJob(0);
                 return;
             }
 
             if (string.Equals(e.Column.ColumnName, "ProdQty", StringComparison.OrdinalIgnoreCase))
             {
-                decimal qty = 0m;
-                if (e.ProposedValue != null && e.ProposedValue != DBNull.Value
-                    && TryParseDecimalFlexible(Convert.ToString(e.ProposedValue), out qty) && qty > 0m)
-                    ScheduleRefreshFtFromQuantity(qty);
-                else
-                    ScheduleRefreshFtFromQuantity();
                 return;
             }
 
             if (string.Equals(e.Column.ColumnName, "JobReleased", StringComparison.OrdinalIgnoreCase))
             {
-                if (IsProposedBooleanTrue(e.ProposedValue))
-                    ScheduleRefreshFtAfterRelease();
                 return;
             }
 
             if (string.Equals(e.Column.ColumnName, "JobEngineered", StringComparison.OrdinalIgnoreCase))
             {
-                if (IsProposedBooleanTrue(e.ProposedValue))
-                    ScheduleRefreshFtAfterRelease();
                 return;
             }
 
@@ -1300,11 +2256,37 @@ public class Script
 
     private void btnSerializado_Click(object sender, EventArgs e)
     {
+        OpenSerializadoForm(SerializadoFormMode.BrkSerializado);
+    }
+
+    private void WireOtrosButton()
+    {
         try
         {
+            _btnOtros = csm.GetNativeControlReference(OtrosButtonEpGuid) as Control;
+            if (_btnOtros == null)
+                return;
+            _btnOtros.Click -= btnOtros_Click;
+            _btnOtros.Click += btnOtros_Click;
+        }
+        catch
+        {
+        }
+    }
+
+    private void btnOtros_Click(object sender, EventArgs e)
+    {
+        OpenSerializadoForm(SerializadoFormMode.Otros);
+    }
+
+    private void OpenSerializadoForm(SerializadoFormMode mode)
+    {
+        try
+        {
+            string formLabel = mode == SerializadoFormMode.Otros ? "Otros" : "Serializado";
             if (edvJobHead == null || edvJobHead.Row < 0)
             {
-                MessageBox.Show("Abra o cree un Job antes de usar Serializado.", "Serializado",
+                MessageBox.Show("Abra o cree un Job antes de usar " + formLabel + ".", formLabel,
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -1312,13 +2294,13 @@ public class Script
             string jobNum = GetJobField("JobNum");
             if (string.IsNullOrWhiteSpace(jobNum))
             {
-                MessageBox.Show("El Job no tiene número. Guarde el Job primero.", "Serializado",
+                MessageBox.Show("El Job no tiene número. Guarde el Job primero.", formLabel,
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             string cliente = ResolveClienteJobEntry();
-            using (var frm = new SerializadoJobEntryForm(JobEntryForm, oTrans, edvJobHead, edvJobProd, cliente, PersistSerializadoJob, userID))
+            using (var frm = new SerializadoJobEntryForm(JobEntryForm, oTrans, edvJobHead, edvJobProd, cliente, PersistSerializadoJob, userID, mode))
                 frm.ShowDialog(JobEntryForm);
         }
         catch (Exception ex)
@@ -1418,6 +2400,9 @@ public class Script
     {
         try
         {
+            if (!ShouldRunRuntimeUiLogic())
+                return;
+
             if (edvJobHead == null || edvJobHead.Row < 0)
                 return;
 
@@ -1427,11 +2412,15 @@ public class Script
                 return;
             }
 
+            if (args.NotifyType == EpiTransaction.NotifyType.InitLastView)
+            {
+                WireJobProdColumnChanged();
+                return;
+            }
+
             string cn = GetEpiNotifyColumnName(view, args);
             if (IsQuantityColumn(cn))
             {
-                ScheduleRefreshFtFromQuantity();
-
                 if (((Ice.Core.Session)oTrans.Session).PlantID != MoqPlantId)
                     return;
 
@@ -1464,6 +2453,9 @@ public class Script
         part = part.Trim();
         JobEntryBaqCache.InvalidateValidacionParte(part);
         ScheduleRefreshValidacionParte(part, 0);
+
+        if (IsNewJobContext())
+            ScheduleApplyPrioridadDefaultForNewJob(0);
 
         string currentPlant = ((Ice.Core.Session)oTrans.Session).PlantID;
         if (currentPlant == MoqPlantId)
@@ -1682,8 +2674,439 @@ public class Script
         catch { }
     }
 
+    private static bool IsLikelyPrioridadControl(Control control)
+    {
+        if (control == null)
+            return false;
+        string n = NormalizeSearchText(control.Name);
+        if (n.IndexOf("prioridad", StringComparison.Ordinal) >= 0)
+            return true;
+        string typeName = control.GetType().Name ?? string.Empty;
+        return typeName.IndexOf("Combo", StringComparison.OrdinalIgnoreCase) >= 0
+            && n.IndexOf("prioridades", StringComparison.Ordinal) >= 0;
+    }
+
+    private Control FindPrioridadControlRecursive(Control root)
+    {
+        if (root == null)
+            return null;
+        if (IsLikelyPrioridadControl(root))
+            return root;
+        for (int i = 0; i < root.Controls.Count; i++)
+        {
+            Control found = FindPrioridadControlRecursive(root.Controls[i]);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private Control GetPrioridadControl()
+    {
+        try
+        {
+            if (_cmbPrioridad != null && !_cmbPrioridad.IsDisposed)
+                return _cmbPrioridad;
+
+            if (_prioridadControl != null && !_prioridadControl.IsDisposed)
+                return _prioridadControl;
+
+            _cmbPrioridad = csm.GetNativeControlReference(PrioridadControlEpGuid) as EpiUltraCombo;
+            if (_cmbPrioridad != null)
+            {
+                _prioridadControl = _cmbPrioridad;
+                return _prioridadControl;
+            }
+
+            _prioridadControl = csm.GetNativeControlReference(PrioridadControlEpGuid) as Control;
+            if (_prioridadControl == null && JobEntryForm != null)
+            {
+                string[] fallbackNames = new string[]
+                {
+                    PrioridadFieldName, "prioridades_c", "cmbPrioridades_c", "cmbprioridades_c", "Prioridades_c"
+                };
+                for (int i = 0; i < fallbackNames.Length && _prioridadControl == null; i++)
+                    _prioridadControl = FindControlByName(JobEntryForm, fallbackNames[i]);
+            }
+            if (_prioridadControl == null && JobEntryForm != null)
+                _prioridadControl = FindPrioridadControlRecursive(JobEntryForm);
+        }
+        catch
+        {
+        }
+        return _prioridadControl;
+    }
+
+    private static string ReadPrioridadControlText(Control control)
+    {
+        if (control == null)
+            return string.Empty;
+        EpiUltraCombo combo = control as EpiUltraCombo;
+        if (combo != null)
+        {
+            if (!string.IsNullOrWhiteSpace(combo.Text))
+                return combo.Text.Trim();
+            if (combo.Value != null && combo.Value != DBNull.Value)
+                return combo.Value.ToString().Trim();
+        }
+        return control.Text == null ? string.Empty : control.Text.Trim();
+    }
+
+    private string ResolvePrioridadColumnName()
+    {
+        try
+        {
+            if (edvJobHead == null || edvJobHead.dataView == null || edvJobHead.dataView.Table == null)
+                return PrioridadFieldName;
+
+            DataColumnCollection cols = edvJobHead.dataView.Table.Columns;
+            for (int i = 0; i < cols.Count; i++)
+            {
+                if (string.Equals(cols[i].ColumnName, PrioridadFieldName, StringComparison.OrdinalIgnoreCase))
+                    return cols[i].ColumnName;
+            }
+        }
+        catch
+        {
+        }
+        return PrioridadFieldName;
+    }
+
+    private void NotifyJobHeadUiRefresh()
+    {
+        try
+        {
+            oTrans.Refresh();
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool TrySelectPrioridadRowByText(EpiUltraCombo combo, string value)
+    {
+        if (combo == null || string.IsNullOrWhiteSpace(value))
+            return false;
+
+        value = value.Trim();
+        try
+        {
+            for (int i = 0; i < combo.Rows.Count; i++)
+            {
+                string rowText = string.Empty;
+                try
+                {
+                    if (combo.Rows[i].Cells != null && combo.Rows[i].Cells.Count > 0)
+                        rowText = combo.Rows[i].Cells[0].Text;
+                }
+                catch
+                {
+                }
+
+                if (string.IsNullOrWhiteSpace(rowText))
+                    continue;
+                if (!string.Equals(rowText.Trim(), value, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                combo.Rows[i].Selected = true;
+                return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    private bool HasPrioridadUiValue(string expected)
+    {
+        string expectedNorm = string.IsNullOrWhiteSpace(expected) ? string.Empty : expected.Trim();
+        string uiText = ReadPrioridadControlText(GetPrioridadControl());
+        if (expectedNorm.Length == 0)
+            return string.IsNullOrWhiteSpace(uiText);
+        return string.Equals(uiText, expectedNorm, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsNewJobContext()
+    {
+        if (edvJobHead == null || edvJobHead.Row < 0)
+            return false;
+        return string.IsNullOrWhiteSpace(SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum"));
+    }
+
+    private bool TryApplyPrioridadToControl(string value)
+    {
+        try
+        {
+            Control c = GetPrioridadControl();
+            if (c == null)
+                return false;
+
+            EpiUltraCombo combo = c as EpiUltraCombo;
+            if (combo != null)
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                {
+                    combo.Value = null;
+                    combo.Text = string.Empty;
+                }
+                else
+                {
+                    string v = value.Trim();
+                    combo.Value = v;
+                    combo.Text = v;
+                    TrySelectPrioridadRowByText(combo, v);
+                    try
+                    {
+                        combo.ForceRefreshList();
+                    }
+                    catch
+                    {
+                    }
+                }
+                combo.Refresh();
+                NotifyJobHeadUiRefresh();
+                return HasPrioridadUiValue(value);
+            }
+
+            c.Text = value ?? string.Empty;
+            c.Refresh();
+            return string.IsNullOrWhiteSpace(value)
+                || string.Equals(ReadPrioridadControlText(c), value.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void SetPrioridadField(string value)
+    {
+        if (edvJobHead == null || edvJobHead.Row < 0)
+            return;
+
+        try
+        {
+            SetPrioridadDataValue(value);
+            TryApplyPrioridadToControl(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private void ApplyPrioridadDefaultForNewJob()
+    {
+        if (!ShouldRunRuntimeUiLogic() || !IsNewJobContext())
+            return;
+        _prioridadClearAfterSave = true;
+        SetPrioridadDataValue(PrioridadDefaultValue);
+        TryApplyPrioridadToControl(PrioridadDefaultValue);
+        NotifyJobHeadUiRefresh();
+        ScheduleDelayedPrioridadUiRefresh(PrioridadDefaultValue, 300);
+        ScheduleDelayedPrioridadUiRefresh(PrioridadDefaultValue, 700);
+    }
+
+    private void SetPrioridadDefaultOnRow(EpiDataView view, int row)
+    {
+        if (view == null || row < 0 || view.dataView == null || view.dataView.Table == null)
+            return;
+
+        try
+        {
+            string column = ResolvePrioridadColumnName();
+            if (!view.dataView.Table.Columns.Contains(column))
+                return;
+            view.dataView[row][column] = PrioridadDefaultValue;
+            view.dataView[row].EndEdit();
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool IsPrioridadRefreshAdapterMethod(string method)
+    {
+        if (string.IsNullOrWhiteSpace(method))
+            return false;
+
+        switch (method.Trim().ToLowerInvariant())
+        {
+            case "changepartnum":
+            case "changejobheadpartnum":
+            case "getdetails":
+            case "newjobhead":
+            case "getnewjobhead":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void SetPrioridadDataValue(string value)
+    {
+        if (edvJobHead == null || edvJobHead.Row < 0)
+            return;
+
+        try
+        {
+            string column = ResolvePrioridadColumnName();
+            if (edvJobHead.dataView != null && edvJobHead.dataView.Table != null
+                && edvJobHead.dataView.Table.Columns.Contains(column))
+            {
+                edvJobHead.dataView[edvJobHead.Row][column] =
+                    string.IsNullOrWhiteSpace(value) ? (object)DBNull.Value : value.Trim();
+                edvJobHead.dataView[edvJobHead.Row].EndEdit();
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void ScheduleDelayedPrioridadUiRefresh(string value, int delayMs)
+    {
+        if (!ShouldRunRuntimeUiLogic() || string.IsNullOrWhiteSpace(value))
+            return;
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed)
+                return;
+
+            Timer delayTimer = new Timer();
+            delayTimer.Interval = Math.Max(100, delayMs);
+            delayTimer.Tick += delegate(object s, EventArgs ev)
+            {
+                delayTimer.Stop();
+                delayTimer.Dispose();
+                try
+                {
+                    if (!IsNewJobContext())
+                        return;
+                    if (HasPrioridadUiValue(value))
+                        return;
+                    TryApplyPrioridadToControl(value);
+                }
+                catch
+                {
+                }
+            };
+            delayTimer.Start();
+        }
+        catch
+        {
+        }
+    }
+
+    private void ClearPrioridadField()
+    {
+        _prioridadClearAfterSave = false;
+        SetPrioridadField(string.Empty);
+    }
+
+    private void ClearPrioridadUiOnly()
+    {
+        _prioridadClearAfterSave = false;
+        TryApplyPrioridadToControl(string.Empty);
+    }
+
+    private void ScheduleApplyPrioridadDefaultForNewJob(int attempt)
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+        if (attempt < 0 || attempt >= MaxPrioridadApplyAttempts)
+            return;
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed)
+                return;
+
+            MethodInvoker work = delegate
+            {
+                try
+                {
+                    if (!IsNewJobContext())
+                        return;
+                    if (HasPrioridadUiValue(PrioridadDefaultValue))
+                        return;
+
+                    ApplyPrioridadDefaultForNewJob();
+
+                    if (!HasPrioridadUiValue(PrioridadDefaultValue)
+                        && attempt + 1 < MaxPrioridadApplyAttempts)
+                        ScheduleApplyPrioridadDefaultForNewJob(attempt + 1);
+                }
+                catch
+                {
+                }
+            };
+
+            if (!host.IsHandleCreated)
+                return;
+
+            if (attempt == 0)
+            {
+                host.BeginInvoke(work);
+                return;
+            }
+
+            Timer retryTimer = new Timer();
+            retryTimer.Interval = Math.Min(150 + (attempt * 120), 900);
+            retryTimer.Tick += delegate(object s, EventArgs ev)
+            {
+                retryTimer.Stop();
+                retryTimer.Dispose();
+                if (host.IsDisposed)
+                    return;
+                host.BeginInvoke(work);
+            };
+            retryTimer.Start();
+        }
+        catch
+        {
+        }
+    }
+
+    private void ScheduleClearPrioridadAfterSave()
+    {
+        if (!_prioridadClearAfterSave)
+            return;
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed || !host.IsHandleCreated)
+            {
+                ClearPrioridadUiOnly();
+                return;
+            }
+
+            host.BeginInvoke((MethodInvoker)delegate
+            {
+                try
+                {
+                    ClearPrioridadUiOnly();
+                }
+                catch
+                {
+                }
+            });
+        }
+        catch
+        {
+            ClearPrioridadUiOnly();
+        }
+    }
+
     private void ApplyDesvComentarioAccess()
     {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
         string[] usuariosPermitidos = { "SValdez", "KCabrera", "Eperez" };
         try
         {
@@ -1788,6 +3211,11 @@ public class Script
             _btnSerializado.Click -= btnSerializado_Click;
             _btnSerializado = null;
         }
+        if (_btnOtros != null)
+        {
+            _btnOtros.Click -= btnOtros_Click;
+            _btnOtros = null;
+        }
         if (_txtOrdenDeVenta != null)
         {
             _txtOrdenDeVenta.Leave -= OrdenDeVenta_Leave;
@@ -1806,14 +3234,22 @@ public class Script
     {
         switch (args.Tool.Key)
         {
+            case "RefreshTool":
+                if (edvJobHead != null && edvJobHead.Row >= 0)
+                {
+                    string refreshJob = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+                    if (!string.IsNullOrWhiteSpace(refreshJob))
+                        LoadFtCorridaOnJobConsult(refreshJob.Trim());
+                }
+                break;
             case "ClearTool":
-                _deferredFtGeneration++;
+                ResetFtCorridaForNewJob();
                 _validacionRefreshGeneration++;
-                _lastLoadedFtJobNum = string.Empty;
-                _pendingFtDisplayValue = string.Empty;
                 _pendingValidacionPart = string.Empty;
-                SetFtCorridaField(string.Empty);
                 ApplyValidacionParteUi(string.Empty);
+                _prioridadControl = null;
+                _cmbPrioridad = null;
+                ScheduleApplyPrioridadDefaultForNewJob(0);
                 ScheduleApplyHiddenJobEntryFields(0);
                 break;
         }
@@ -2078,8 +3514,16 @@ public class Script
             mensaje = "NO VALIDADO";
 
         bool validado = string.Equals(mensaje, "VALIDADO", StringComparison.OrdinalIgnoreCase);
-        ctrl.BackColor = validado ? Color.LightGreen : Color.Yellow;
-        ctrl.Text = validado ? "VALIDADO" : mensaje;
+        Color bg = validado ? Color.LightGreen : Color.Yellow;
+        string text = validado ? "VALIDADO" : mensaje;
+        if (string.Equals(_lastValidacionUiText, text, StringComparison.Ordinal)
+            && _lastValidacionUiBackColor.ToArgb() == bg.ToArgb())
+            return;
+
+        ctrl.BackColor = bg;
+        ctrl.Text = text;
+        _lastValidacionUiText = text;
+        _lastValidacionUiBackColor = bg;
     }
 
     private void ScheduleRefreshValidacionParte(string part, int attempt)
@@ -2099,10 +3543,12 @@ public class Script
             Form host = JobEntryForm;
             if (host == null || host.IsDisposed)
             {
-                try { coonsultavlidacion(part, true); }
+                try { coonsultavlidacion(part, false); }
                 catch { }
                 return;
             }
+
+            bool forceReload = attempt > 0;
 
             int delayMs = attempt == 0 ? 80 : Math.Min(150 + (attempt * 100), 700);
             Timer refreshTimer = new Timer();
@@ -2118,7 +3564,7 @@ public class Script
 
                 try
                 {
-                    coonsultavlidacion(part, true);
+                    coonsultavlidacion(part, forceReload);
                 }
                 catch
                 {
@@ -2132,7 +3578,7 @@ public class Script
         }
         catch
         {
-            try { coonsultavlidacion(part, true); }
+            try { coonsultavlidacion(part, false); }
             catch { }
         }
     }
@@ -2156,13 +3602,35 @@ public class Script
 
         JobEntryBaqCache.InvalidateValidacionParte(part);
         ScheduleRefreshValidacionParte(part, 0);
+
+        if (IsNewJobContext())
+            ScheduleApplyPrioridadDefaultForNewJob(0);
     }
 
     private void oTrans_jobAdapter_BeforeAdapterMethod(object sender, BeforeAdapterMethodArgs args)
     {
+        if (string.Equals(args.MethodName, "GetByID", StringComparison.OrdinalIgnoreCase))
+        {
+            _ftWatchGeneration++;
+            ForceClearFtCorridaUi();
+            _lastLoadedFtJobNum = string.Empty;
+            _ftConsultJobNum = string.Empty;
+            _pendingFtDisplayValue = string.Empty;
+            _ftWatchExpectedJob = string.Empty;
+            _ftConsultInFlightJob = string.Empty;
+            _lastDeferredJobLoadKey = string.Empty;
+        }
+
         switch (args.MethodName)
         {
             case "Update":
+                TryCommitJobHeadUiEdits();
+                if (IsNewJobContext())
+                {
+                    string prioridadActual = SafeDataViewString(edvJobHead, edvJobHead.Row, PrioridadFieldName);
+                    if (string.IsNullOrWhiteSpace(prioridadActual))
+                        SetPrioridadField(PrioridadDefaultValue);
+                }
                 JobSt = ((EpiDataView)(this.oTrans.EpiDataViews["JobHead"]));
                 warehouse = ((EpiDataView)(this.oTrans.EpiDataViews["JobProd"]));
                 if (JobSt.Row > -1)
@@ -2205,7 +3673,6 @@ public class Script
                 break;
         }
     }
-
 
     private void SetOrdenCompraField(EpiDataView view, string po)
     {
@@ -2337,28 +3804,66 @@ public class Script
     private void SetFtCorridaField(string value)
     {
         _pendingFtDisplayValue = value == null ? string.Empty : value.Trim();
+        if (edvJobHead != null && edvJobHead.Row >= 0)
+        {
+            string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+            if (!string.IsNullOrWhiteSpace(jobNum))
+                _ftConsultJobNum = jobNum.Trim();
+        }
         if (TryApplyFtCorridaField(_pendingFtDisplayValue))
             return;
 
-        if (_ftFieldApplyScheduled)
+        ScheduleApplyFtCorridaField(0);
+    }
+
+    private void ScheduleApplyFtCorridaField(int attempt)
+    {
+        if (attempt < 0 || attempt >= MaxFtFieldApplyAttempts)
             return;
 
-        _ftFieldApplyScheduled = true;
         try
         {
             Form host = JobEntryForm;
             if (host == null || host.IsDisposed)
                 return;
 
-            host.BeginInvoke((MethodInvoker)delegate
+            MethodInvoker work = delegate
             {
-                _ftFieldApplyScheduled = false;
-                TryApplyFtCorridaField(_pendingFtDisplayValue);
-            });
+                try
+                {
+                    if (TryApplyFtCorridaField(_pendingFtDisplayValue))
+                        return;
+                    if (attempt + 1 < MaxFtFieldApplyAttempts)
+                        ScheduleApplyFtCorridaField(attempt + 1);
+                }
+                catch
+                {
+                }
+            };
+
+            if (!host.IsHandleCreated)
+                return;
+
+            if (attempt == 0)
+            {
+                host.BeginInvoke(work);
+                return;
+            }
+
+            Timer retryTimer = new Timer();
+            retryTimer.Interval = Math.Min(80 + (attempt * 60), 600);
+            retryTimer.Tick += delegate(object s, EventArgs ev)
+            {
+                retryTimer.Stop();
+                retryTimer.Dispose();
+                if (host.IsDisposed)
+                    return;
+                host.BeginInvoke(work);
+            };
+            retryTimer.Start();
         }
         catch
         {
-            _ftFieldApplyScheduled = false;
         }
     }
 
@@ -2366,9 +3871,7 @@ public class Script
     {
         try
         {
-            Control c = epiNumericEditorC1 as Control;
-            if (c == null)
-                c = csm.GetNativeControlReference(FtCorridaControlEpGuid);
+            Control c = GetFtCorridaControl();
             if (c == null)
                 return false;
 
@@ -2376,18 +3879,26 @@ public class Script
             if (ne != null)
             {
                 if (string.IsNullOrWhiteSpace(text))
+                {
                     ne.Value = null;
+                    ne.Text = string.Empty;
+                }
                 else
                 {
                     decimal d;
                     if (TryParseDecimalFlexible(text, out d))
+                    {
                         ne.Value = d;
+                        ne.Text = FormatFtDisplay(d);
+                    }
+                    else
+                        ne.Text = text;
                 }
                 ne.Refresh();
                 return true;
             }
 
-            c.Text = text;
+            c.Text = text ?? string.Empty;
             c.Refresh();
             return true;
         }
@@ -2404,49 +3915,125 @@ public class Script
 
     private string QueryFtBaQ(string jobNum)
     {
+        return QueryFtBaQ(jobNum, false);
+    }
+
+    private string QueryFtBaQ(string jobNum, bool skipCache)
+    {
         if (string.IsNullOrWhiteSpace(jobNum))
             return string.Empty;
 
+        jobNum = jobNum.Trim();
+
+        if (!skipCache)
+        {
+            string cachedFt;
+            if (JobEntryBaqCache.TryGetFtBaQ(jobNum, out cachedFt) && !IsStaleFtCacheValue(cachedFt))
+                return cachedFt;
+        }
+
+        string ftValue = ExecuteFtBaQQuery(jobNum, "JOBNUM");
+        if (!IsStaleFtCacheValue(ftValue))
+        {
+            JobEntryBaqCache.SetFtBaQ(jobNum, ftValue);
+            return ftValue;
+        }
+
+        string altKey = jobNum.TrimStart('0');
+        if (altKey.Length > 0 && !string.Equals(altKey, jobNum, StringComparison.Ordinal))
+        {
+            ftValue = ExecuteFtBaQQuery(altKey, "JOBNUM");
+            if (!IsStaleFtCacheValue(ftValue))
+            {
+                JobEntryBaqCache.SetFtBaQ(jobNum, ftValue);
+                return ftValue;
+            }
+        }
+
+        ftValue = ExecuteFtBaQQuery(jobNum, "JobNum");
+        if (!IsStaleFtCacheValue(ftValue))
+            JobEntryBaqCache.SetFtBaQ(jobNum, ftValue);
+
+        return ftValue;
+    }
+
+    private string ExecuteFtBaQQuery(string jobKey, string paramName)
+    {
         try
         {
             using (DynamicQueryAdapter adapterDynamicQuery = new DynamicQueryAdapter(this.oTrans))
             {
                 adapterDynamicQuery.BOConnect();
                 Ice.BO.QueryExecutionDataSet ds = new Ice.BO.QueryExecutionDataSet();
-                ds.ExecutionParameter.AddExecutionParameterRow("JOBNUM", jobNum.Trim(), "nvarchar", false, Guid.Empty, "A");
+                ds.ExecutionParameter.AddExecutionParameterRow(paramName, jobKey, "nvarchar", false, Guid.Empty, "A");
                 adapterDynamicQuery.ExecuteByID(FtCorridaBaqName, ds);
                 DataTable results = adapterDynamicQuery.QueryResults.Tables["Results"];
                 if (results == null || results.Rows.Count == 0)
                     return string.Empty;
-
-                DataRow row = results.Rows[0];
-                string[] columnHints = new string[]
-                {
-                    "FT", "Ft", "TotalFt", "TotalFT", "FTCorrida", "Calculated_FTCorrida"
-                };
-                for (int h = 0; h < columnHints.Length; h++)
-                {
-                    for (int c = 0; c < results.Columns.Count; c++)
-                    {
-                        string colName = results.Columns[c].ColumnName ?? string.Empty;
-                        if (colName.IndexOf(columnHints[h], StringComparison.OrdinalIgnoreCase) < 0)
-                            continue;
-                        object cell = row[c];
-                        if (cell == null || cell == DBNull.Value)
-                            continue;
-                        string parsed = cell.ToString().Trim();
-                        if (parsed.Length > 0)
-                            return parsed;
-                    }
-                }
-
-                if (row[0] != null && row[0] != DBNull.Value)
-                    return row[0].ToString().Trim();
+                object cell = results.Rows[0][0];
+                if (cell == null || cell == DBNull.Value)
+                    return string.Empty;
+                string ftText = cell.ToString().Trim();
+                if (ftText.Length == 0 || string.Equals(ftText, ".", StringComparison.Ordinal))
+                    return string.Empty;
+                return ftText;
             }
         }
         catch
         {
+            return string.Empty;
         }
+    }
+
+    private static string ParseFtBaQResults(DataTable results, string jobKey)
+    {
+        if (results == null || results.Rows.Count == 0)
+            return string.Empty;
+
+        DataRow row = results.Rows[0];
+        string[] columnHints = new string[]
+        {
+            "FTCorrida", "Calculated_FTCorrida", "TotalFT", "TotalFt", "FT", "Ft", "Number12"
+        };
+        for (int h = 0; h < columnHints.Length; h++)
+        {
+            for (int c = 0; c < results.Columns.Count; c++)
+            {
+                string colName = results.Columns[c].ColumnName ?? string.Empty;
+                if (colName.IndexOf(columnHints[h], StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                string parsed = ParseFtBaQCellValue(row[c], jobKey);
+                if (!string.IsNullOrWhiteSpace(parsed))
+                    return parsed;
+            }
+        }
+
+        for (int c = 0; c < results.Columns.Count; c++)
+        {
+            string parsed = ParseFtBaQCellValue(row[c], jobKey);
+            if (!string.IsNullOrWhiteSpace(parsed))
+                return parsed;
+        }
+        return string.Empty;
+    }
+
+    private static string ParseFtBaQCellValue(object cell, string jobNum)
+    {
+        if (cell == null || cell == DBNull.Value)
+            return string.Empty;
+
+        string parsed = cell.ToString().Trim();
+        if (parsed.Length == 0 || string.Equals(parsed, ".", StringComparison.Ordinal))
+            return string.Empty;
+
+        if (!string.IsNullOrWhiteSpace(jobNum)
+            && string.Equals(parsed, jobNum.Trim(), StringComparison.OrdinalIgnoreCase))
+            return string.Empty;
+
+        decimal ftValue;
+        if (TryParseDecimalFlexible(parsed, out ftValue) && ftValue > 0m)
+            return ftValue.ToString("0.0000", CultureInfo.InvariantCulture);
+
         return string.Empty;
     }
 
@@ -2466,7 +4053,6 @@ public class Script
         bool sameJob = string.Equals(_lastLoadedFtJobNum, jobNum, StringComparison.OrdinalIgnoreCase);
         string ftValue = string.Empty;
 
-        // Epicor suele limpiar el control al rebind; aunque el job ya se cargó, hay que repintar el FT.
         if (!forceReload && sameJob
             && JobEntryBaqCache.TryGetFtBaQ(jobNum, out ftValue)
             && !IsStaleFtCacheValue(ftValue))
@@ -2491,13 +4077,8 @@ public class Script
             SetFtCorridaField(ftValue);
             _lastLoadedFtJobNum = jobNum;
         }
-        else if (!ShouldUseFtBaQAsSource() && TryCalculateAndSetFtCorrida())
-        {
-        }
         else
-        {
             SetFtCorridaField(string.Empty);
-        }
     }
 
     private void ScheduleDeferredFtLoad(EpiDataView view, int row)
@@ -2521,25 +4102,6 @@ public class Script
             if (host == null || host.IsDisposed)
                 return;
 
-
-
-
-                        for(x=0; x<=100; x++){
-
-                                int ParseSerialNumber(y=0; y>0);
-                                            decimal ParseSerialNumber(x=0; x>25; x-1);
-
-                                                    do{
-                                                    }while(Exception e);
-                                                            Print " hamilton ";
-                                    windows.32Int = 1;
-                                    Windows.Int16=23;
-                                            Int ttM; 
-                        }
-
-
-
-
             MethodInvoker work = delegate
             {
                 try
@@ -2556,11 +4118,21 @@ public class Script
                         return;
                     }
 
-                    JobEntryBaqCache.InvalidateFtBaQ(readyJobNum);
-                    TryLoadFtCorrida(edvJobHead, edvJobHead.Row, true);
+                    decimal gateQty;
+                    if (!IsFtCalculationReady(out gateQty))
+                    {
+                        if (attempt + 1 < MaxDeferredFtAttempts)
+                            ScheduleDeferredFtLoad(edvJobHead, edvJobHead.Row, attempt + 1);
+                        return;
+                    }
 
-                    if (!HasFtCorridaDisplayValue() && !ShouldUseFtBaQAsSource())
+                    TryLoadFtCorrida(edvJobHead, edvJobHead.Row, attempt > 0);
+
+                    if (!HasFtCorridaDisplayValue())
                         TryCalculateAndSetFtCorrida();
+
+                    if (!HasFtCorridaDisplayValue())
+                        TryApplyFtCorridaField(_pendingFtDisplayValue);
 
                     if (HasFtCorridaDisplayValue())
                         return;
@@ -2599,29 +4171,56 @@ public class Script
         }
     }
 
+    private static bool IsJobLoadAdapterMethod(string method)
+    {
+        return string.Equals(method, "GetByID", StringComparison.OrdinalIgnoreCase);
+    }
+
     private void oTrans_jobAdapter_AfterAdapterMethod(object sender, AfterAdapterMethodArgs args)
     {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
         string method = args.MethodName == null ? string.Empty : args.MethodName.Trim();
-        bool reloadFt = string.Equals(method, "GetByID", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(method, "Update", StringComparison.OrdinalIgnoreCase);
-        if (!reloadFt)
+        if (IsNewJobContext() && IsPrioridadRefreshAdapterMethod(method))
+            ScheduleApplyPrioridadDefaultForNewJob(0);
+
+        bool isJobLoad = IsJobLoadAdapterMethod(method);
+        bool isUpdate = string.Equals(method, "Update", StringComparison.OrdinalIgnoreCase);
+        if (!isJobLoad && !isUpdate)
             return;
 
         try
         {
             if (edvJobHead == null || edvJobHead.Row < 0)
                 return;
-            _lastLoadedFtJobNum = string.Empty;
-            if (ShouldUseFtBaQAsSource())
-                ScheduleRefreshFtAfterRelease();
-            else
+            _lastDeferredJobLoadKey = string.Empty;
+            RehideKnownJobEntryFields();
+            EnsureProtectedJobEntryFieldsVisible();
+
+            string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+            if (string.IsNullOrWhiteSpace(jobNum))
             {
-                ScheduleRefreshFtFromQuantity();
-                ScheduleDeferredFtLoad(edvJobHead, edvJobHead.Row, 0);
+                ResetFtCorridaForNewJob();
             }
+            else if (isJobLoad)
+            {
+                RequestFtConsultForJob(jobNum.Trim());
+            }
+            else if (isUpdate)
+            {
+                ScheduleCalculateFtOnSave(0);
+                if (_prioridadClearAfterSave)
+                {
+                    string jobAfterSave = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+                    if (!string.IsNullOrWhiteSpace(jobAfterSave))
+                        ScheduleClearPrioridadAfterSave();
+                }
+            }
+
             ScheduleApplyHiddenJobEntryFields(0);
 
-            if (string.Equals(method, "GetByID", StringComparison.OrdinalIgnoreCase))
+            if (isJobLoad)
             {
                 string part = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
                 if (!string.IsNullOrWhiteSpace(part))
@@ -2643,11 +4242,12 @@ public class Script
 
         string part = SafeDataViewString(view, row, "PartNum");
         string jobNum = SafeDataViewString(view, row, "JobNum");
-        string key = jobNum + "\x1e" + part + "\x1e" + row.ToString(CultureInfo.InvariantCulture);
-        if (string.Equals(_pendingDeferredJobKey, key, StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(jobNum))
+        string key = jobNum + "\x1e" + part;
+        if (!string.IsNullOrWhiteSpace(jobNum)
+            && string.Equals(_lastDeferredJobLoadKey, key, StringComparison.Ordinal))
             return;
 
-        _pendingDeferredJobKey = key;
+        _pendingDeferredJobKey = key + "\x1e" + row.ToString(CultureInfo.InvariantCulture);
         _pendingDeferredRow = row;
 
         try
@@ -2697,15 +4297,15 @@ public class Script
     {
         string part = SafeDataViewString(view, row, "PartNum");
         string jobnum = SafeDataViewString(view, row, "JobNum");
+        string loadKey = jobnum + "\x1e" + part;
+        if (!string.IsNullOrWhiteSpace(jobnum)
+            && string.Equals(_lastDeferredJobLoadKey, loadKey, StringComparison.Ordinal))
+            return;
+
+        _lastDeferredJobLoadKey = loadKey;
+        SuppressFtClearDuringJobLoad();
 
         ApplyHiddenJobEntryFields();
-        if (ShouldUseFtBaQAsSource())
-            RefreshFtCorridaFromBaQOnly();
-        else
-        {
-            RefreshFtCorridaNow();
-            ScheduleDeferredFtLoad(view, row, string.IsNullOrWhiteSpace(jobnum) ? 0 : 1);
-        }
 
         try
         {
@@ -2721,6 +4321,9 @@ public class Script
         try { coonsultavlidacion(part); } catch { }
         try { VALIDARMOQJOB(part); } catch { }
 
+        if (IsNewJobContext())
+            ScheduleApplyPrioridadDefaultForNewJob(0);
+
         ScheduleApplyHiddenJobEntryFields(0);
     }
 
@@ -2729,8 +4332,21 @@ public class Script
         if (args.Row <= -1)
             return;
 
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
         if (args.NotifyType == EpiTransaction.NotifyType.Initialize)
         {
+            string initJobNum = SafeDataViewString(view, args.Row, "JobNum");
+            if (string.IsNullOrWhiteSpace(initJobNum))
+            {
+                ResetFtCorridaForNewJob();
+                SetPrioridadDefaultOnRow(view, args.Row);
+                ScheduleApplyPrioridadDefaultForNewJob(0);
+            }
+            else
+                RequestFtConsultForJob(initJobNum);
+
             WireJobHeadColumnChanged();
             WireJobProdColumnChanged();
             WireOrdenVentaLeave();
@@ -2742,33 +4358,42 @@ public class Script
             return;
         }
 
+        if (args.NotifyType == EpiTransaction.NotifyType.AddRow)
+        {
+            ResetFtCorridaForNewJob();
+            _prioridadControl = null;
+            _cmbPrioridad = null;
+            SetPrioridadDefaultOnRow(view, args.Row);
+            ScheduleApplyPrioridadDefaultForNewJob(0);
+            return;
+        }
+
         if (args.NotifyType == EpiTransaction.NotifyType.InitLastView)
         {
+            _lastDeferredJobLoadKey = string.Empty;
             TryPopulateOrdenCompraFromOv(view, args.Row);
-            ApplyHiddenJobEntryFields();
             WireJobProdColumnChanged();
             WireQuantityLeaveEvents();
             ScheduleWireQuantityLeave(0);
-            _lastLoadedFtJobNum = string.Empty;
-            if (ShouldUseFtBaQAsSource())
-                ScheduleRefreshFtAfterRelease();
-            else
+
+            string loadJobNum = SafeDataViewString(view, args.Row, "JobNum");
+            if (string.IsNullOrWhiteSpace(loadJobNum))
             {
-                ScheduleRefreshFtFromQuantity();
-                ScheduleDeferredFtLoad(view, args.Row, 0);
+                ResetFtCorridaForNewJob();
+                SetPrioridadDefaultOnRow(view, args.Row);
+                ScheduleApplyPrioridadDefaultForNewJob(0);
             }
+            else
+                RequestFtConsultForJob(loadJobNum);
+
             ScheduleDeferredJobHeadLoad(view, args.Row);
+            RehideKnownJobEntryFields();
+            EnsureProtectedJobEntryFieldsVisible();
             ScheduleApplyHiddenJobEntryFields(0);
             return;
         }
 
         string headCol = GetEpiNotifyColumnName(view, args);
-        if (string.Equals(headCol, "ProdQty", StringComparison.OrdinalIgnoreCase))
-            ScheduleRefreshFtFromQuantity();
-        if (string.Equals(headCol, "JobReleased", StringComparison.OrdinalIgnoreCase) && IsCurrentJobReleased())
-            ScheduleRefreshFtAfterRelease();
-        if (string.Equals(headCol, "JobEngineered", StringComparison.OrdinalIgnoreCase) && IsCurrentJobEngineered())
-            ScheduleRefreshFtAfterRelease();
     }
 }
 
@@ -2854,6 +4479,14 @@ public static class JobEntryBaqCache
         if (jobNum.Length == 0)
             return;
         FtByJob.Remove(jobNum);
+    }
+
+    public static void InvalidateFtPerMill(string partNum)
+    {
+        partNum = NormalizeKey(partNum);
+        if (partNum.Length == 0)
+            return;
+        FtPerMillByPart.Remove(partNum);
     }
 
     public static bool TryGetFtPerMill(string partNum, out decimal value)
@@ -3292,10 +4925,22 @@ public static class SerializadoBaqService
 
 public delegate bool SerializadoPersistHandler(out string error);
 
+public enum SerializadoFormMode
+{
+    BrkSerializado,
+    Otros
+}
+
 public static class SerializadoSaveService
 {
     public static bool TrySave(EpiDataView edvJobHead, SerializadoJobData data, List<SerializadoRollRow> rolls,
         SerializadoPersistHandler persist, string userId, out string error)
+    {
+        return TrySave(edvJobHead, data, rolls, persist, userId, true, out error);
+    }
+
+    public static bool TrySave(EpiDataView edvJobHead, SerializadoJobData data, List<SerializadoRollRow> rolls,
+        SerializadoPersistHandler persist, string userId, bool requirePrefix, out string error)
     {
         error = string.Empty;
         if (edvJobHead == null || edvJobHead.Row < 0)
@@ -3327,7 +4972,7 @@ public static class SerializadoSaveService
         }
 
         string prefix = data.SerialPrefix == null ? string.Empty : data.SerialPrefix.Trim();
-        if (prefix.Length == 0)
+        if (prefix.Length == 0 && requirePrefix)
         {
             error = "Ingrese el prefijo serial (2 caracteres) antes de guardar en Epicor.";
             return false;
@@ -3486,6 +5131,7 @@ public sealed class SerializadoJobEntryForm : Form
     private readonly EpiDataView _edvJobProd;
     private readonly SerializadoPersistHandler _persistHandler;
     private readonly string _userId;
+    private readonly SerializadoFormMode _mode;
     private readonly SerializadoJobData _data = new SerializadoJobData();
     private readonly List<SerializadoRollRow> _rolls = new List<SerializadoRollRow>();
 
@@ -3507,14 +5153,22 @@ public sealed class SerializadoJobEntryForm : Form
     private readonly DataGridView _grid;
     private readonly TabControl _tabControl;
 
+    private bool IsOtrosMode { get { return _mode == SerializadoFormMode.Otros; } }
+
     public SerializadoJobEntryForm(Form owner, object oTrans, EpiDataView edvJobHead, EpiDataView edvJobProd, string cliente, SerializadoPersistHandler persistHandler, string userId)
+        : this(owner, oTrans, edvJobHead, edvJobProd, cliente, persistHandler, userId, SerializadoFormMode.BrkSerializado)
+    {
+    }
+
+    public SerializadoJobEntryForm(Form owner, object oTrans, EpiDataView edvJobHead, EpiDataView edvJobProd, string cliente, SerializadoPersistHandler persistHandler, string userId, SerializadoFormMode mode)
     {
         _oTrans = oTrans;
         _edvJobHead = edvJobHead;
         _edvJobProd = edvJobProd;
         _persistHandler = persistHandler;
         _userId = userId ?? string.Empty;
-        Text = "Serializado — Consecutivo de folios";
+        _mode = mode;
+        Text = IsOtrosMode ? "Otros — Consecutivo de folios" : "Serializado — Consecutivo de folios";
         Size = new Size(1080, 720);
         StartPosition = FormStartPosition.CenterParent;
         MinimumSize = new Size(900, 620);
@@ -3555,14 +5209,23 @@ public sealed class SerializadoJobEntryForm : Form
 
     private Panel BuildHeader()
     {
-        Panel p = new Panel { Dock = DockStyle.Top, Height = 64, BackColor = Color.FromArgb(0, 86, 179) };
+        Panel p = new Panel { Dock = DockStyle.Top, Height = 64 };
+        if (IsOtrosMode)
+        {
+            p.Paint += HeaderPanel_PaintOtrosGradient;
+        }
+        else
+        {
+            p.BackColor = Color.FromArgb(0, 86, 179);
+        }
         Label title = new Label
         {
-            Text = "CodiFlex — Serializado de producción",
+            Text = IsOtrosMode ? "CodiFlex — Serializado (Otros)" : "CodiFlex — Serializado de producción",
             ForeColor = Color.White,
             Font = new Font("Segoe UI Semibold", 13f),
             Location = new Point(16, 10),
-            AutoSize = true
+            AutoSize = true,
+            BackColor = Color.Transparent
         };
         Label sub = new Label
         {
@@ -3570,11 +5233,32 @@ public sealed class SerializadoJobEntryForm : Form
             ForeColor = Color.FromArgb(200, 220, 255),
             Font = new Font("Segoe UI", 8.5f),
             Location = new Point(18, 36),
-            AutoSize = true
+            AutoSize = true,
+            BackColor = Color.Transparent
         };
         p.Controls.Add(title);
         p.Controls.Add(sub);
         return p;
+    }
+
+    private void HeaderPanel_PaintOtrosGradient(object sender, PaintEventArgs e)
+    {
+        Panel panel = sender as Panel;
+        if (panel == null)
+            return;
+
+        Rectangle rect = panel.ClientRectangle;
+        if (rect.Width <= 0 || rect.Height <= 0)
+            return;
+
+        using (LinearGradientBrush brush = new LinearGradientBrush(
+            rect,
+            Color.FromArgb(48, 82, 124),
+            Color.FromArgb(92, 128, 168),
+            LinearGradientMode.Horizontal))
+        {
+            e.Graphics.FillRectangle(brush, rect);
+        }
     }
 
     private Panel BuildFooter()
@@ -3672,8 +5356,11 @@ public sealed class SerializadoJobEntryForm : Form
         };
         poPanel.Controls.Add(lblPoDisplay);
 
-        tab1Host.Controls.Add(poPanel);
-        tab1Host.Controls.Add(prefixPanel);
+        if (!IsOtrosMode)
+        {
+            tab1Host.Controls.Add(poPanel);
+            tab1Host.Controls.Add(prefixPanel);
+        }
         tab1Host.Controls.Add(t1);
         tab1.Controls.Add(tab1Host);
 
@@ -3765,7 +5452,8 @@ public sealed class SerializadoJobEntryForm : Form
             RowTemplate = { Height = 28 }
         };
         grid.Columns.Add("RollNum", "Rollo");
-        grid.Columns.Add("Prefix", "Prefijo");
+        if (!IsOtrosMode)
+            grid.Columns.Add("Prefix", "Prefijo");
         grid.Columns.Add("SerialFrom", "De");
         grid.Columns.Add("SerialTo", "A");
         grid.Columns.Add("Quantity", "Cantidad");
@@ -3799,7 +5487,8 @@ public sealed class SerializadoJobEntryForm : Form
         _txtJob.Text = _data.JobNum;
         _txtPart.Text = _data.PartNum;
         _txtDesc.Text = _data.PartDescription;
-        SetPurchaseOrderDisplay(_data.PurchaseOrder);
+        if (!IsOtrosMode)
+            SetPurchaseOrderDisplay(_data.PurchaseOrder);
         _txtOv.Text = _data.SalesOrder;
         _txtCliente.Text = _data.Cliente;
         _txtPrefix.Text = _data.SerialPrefix;
@@ -3810,10 +5499,15 @@ public sealed class SerializadoJobEntryForm : Form
 
         string savedPrefix = SerializadoBaqService.GetField(edvJobHead, "SerialPrefix_c");
         string savedSerialFrom = SerializadoBaqService.GetField(edvJobHead, "SerialFrom_c");
-        if (!string.IsNullOrWhiteSpace(savedPrefix))
+        if (!IsOtrosMode && !string.IsNullOrWhiteSpace(savedPrefix))
         {
             _data.SerialPrefix = savedPrefix;
             _txtPrefix.Text = savedPrefix;
+        }
+        else if (IsOtrosMode)
+        {
+            _data.SerialPrefix = string.Empty;
+            _txtPrefix.Text = string.Empty;
         }
         if (!string.IsNullOrWhiteSpace(savedSerialFrom))
         {
@@ -3832,7 +5526,7 @@ public sealed class SerializadoJobEntryForm : Form
 
     private void LoadFromJobBaqData(EpiDataView edvJobProd)
     {
-        if (string.IsNullOrWhiteSpace(_data.PurchaseOrder) && !string.IsNullOrWhiteSpace(_data.SalesOrder))
+        if (!IsOtrosMode && string.IsNullOrWhiteSpace(_data.PurchaseOrder) && !string.IsNullOrWhiteSpace(_data.SalesOrder))
         {
             _data.PurchaseOrder = SerializadoBaqService.GetPoFromOv(_oTrans, _data.SalesOrder);
             SetPurchaseOrderDisplay(_data.PurchaseOrder);
@@ -3869,7 +5563,7 @@ public sealed class SerializadoJobEntryForm : Form
 
     private void TryAutoCalculateRolls(bool showWarning)
     {
-        if (string.IsNullOrWhiteSpace(_txtPrefix.Text))
+        if (!IsOtrosMode && string.IsNullOrWhiteSpace(_txtPrefix.Text))
         {
             if (showWarning)
                 MessageBox.Show("Ingrese el prefijo (2 caracteres) antes de calcular rollos.", "Validación",
@@ -3895,8 +5589,8 @@ public sealed class SerializadoJobEntryForm : Form
         _data.PurchaseOrder = _txtPo.Text.Trim();
         _data.SalesOrder = _txtOv.Text.Trim();
         _data.Cliente = _txtCliente.Text.Trim();
-        _data.SerialPrefix = _txtPrefix.Text.Trim().ToUpperInvariant();
-        if (_data.SerialPrefix.Length == 0)
+        _data.SerialPrefix = IsOtrosMode ? string.Empty : _txtPrefix.Text.Trim().ToUpperInvariant();
+        if (!IsOtrosMode && _data.SerialPrefix.Length == 0)
             return;
         _data.Salida = string.IsNullOrWhiteSpace(_txtSalida.Text) ? "1" : _txtSalida.Text.Trim();
         _data.TotalQty = _numTotal.Value;
@@ -3914,7 +5608,10 @@ public sealed class SerializadoJobEntryForm : Form
         for (int i = 0; i < _rolls.Count; i++)
         {
             SerializadoRollRow r = _rolls[i];
-            _grid.Rows.Add(r.RollNum, r.Prefix, r.SerialFrom, r.SerialTo, r.Quantity, r.Defectos);
+            if (IsOtrosMode)
+                _grid.Rows.Add(r.RollNum, r.SerialFrom, r.SerialTo, r.Quantity, r.Defectos);
+            else
+                _grid.Rows.Add(r.RollNum, r.Prefix, r.SerialFrom, r.SerialTo, r.Quantity, r.Defectos);
         }
 
         if (_rolls.Count > 0)
@@ -3948,7 +5645,7 @@ public sealed class SerializadoJobEntryForm : Form
 
         try
         {
-            SerializadoConsecutivoPrinter.ShowPreview(this, _data, _rolls);
+            SerializadoConsecutivoPrinter.ShowPreview(this, _data, _rolls, IsOtrosMode);
         }
         catch (Exception ex)
         {
@@ -3963,7 +5660,7 @@ public sealed class SerializadoJobEntryForm : Form
             return;
 
         string error;
-        if (!SerializadoSaveService.TrySave(_edvJobHead, _data, _rolls, _persistHandler, _userId, out error))
+        if (!SerializadoSaveService.TrySave(_edvJobHead, _data, _rolls, _persistHandler, _userId, !IsOtrosMode, out error))
         {
             MessageBox.Show("No se pudo guardar en Epicor:\n" + error, "Guardar",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -4002,7 +5699,7 @@ public sealed class SerializadoJobEntryForm : Form
 
             try
             {
-                SerializadoConsecutivoPrinter.Print(dlg.SelectedPrinter, _data, _rolls);
+                SerializadoConsecutivoPrinter.Print(dlg.SelectedPrinter, _data, _rolls, IsOtrosMode);
                 MessageBox.Show("Consecutivo de folios enviado a:\n" + dlg.SelectedPrinter, "Impresión",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -4181,12 +5878,19 @@ public sealed class SerializadoConsecutivoPreviewForm : Form
 {
     private readonly SerializadoJobData _job;
     private readonly List<SerializadoRollRow> _rolls;
+    private readonly bool _hidePoAndPrefix;
     private PrintDocument _doc;
 
     public SerializadoConsecutivoPreviewForm(SerializadoJobData job, List<SerializadoRollRow> rolls)
+        : this(job, rolls, false)
+    {
+    }
+
+    public SerializadoConsecutivoPreviewForm(SerializadoJobData job, List<SerializadoRollRow> rolls, bool hidePoAndPrefix)
     {
         _job = job;
         _rolls = rolls;
+        _hidePoAndPrefix = hidePoAndPrefix;
         Text = "Vista previa — Consecutivo de folios";
         Size = new Size(1100, 780);
         StartPosition = FormStartPosition.CenterParent;
@@ -4241,7 +5945,7 @@ public sealed class SerializadoConsecutivoPreviewForm : Form
 
     private void PreviewDoc_PrintPage(object sender, PrintPageEventArgs e)
     {
-        SerializadoConsecutivoPrinter.RenderPage(e, _job, _rolls, ref _pageIndex);
+        SerializadoConsecutivoPrinter.RenderPage(e, _job, _rolls, ref _pageIndex, _hidePoAndPrefix);
     }
 
     private void BtnPrint_Click(object sender, EventArgs e)
@@ -4252,7 +5956,7 @@ public sealed class SerializadoConsecutivoPreviewForm : Form
                 return;
             try
             {
-                SerializadoConsecutivoPrinter.Print(dlg.SelectedPrinter, _job, _rolls);
+                SerializadoConsecutivoPrinter.Print(dlg.SelectedPrinter, _job, _rolls, _hidePoAndPrefix);
                 MessageBox.Show("Consecutivo enviado a:\n" + dlg.SelectedPrinter, Text,
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -4278,7 +5982,7 @@ public sealed class SerializadoConsecutivoPreviewForm : Form
                 return;
 
             string error;
-            if (!SerializadoConsecutivoPrinter.TrySaveAsPdf(_job, _rolls, sfd.FileName, out error))
+            if (!SerializadoConsecutivoPrinter.TrySaveAsPdf(_job, _rolls, sfd.FileName, _hidePoAndPrefix, out error))
             {
                 MessageBox.Show("No se pudo guardar el PDF:\n" + error, Text,
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -4308,10 +6012,16 @@ public static class SerializadoConsecutivoPrinter
     private static SerializadoJobData _job;
     private static List<SerializadoRollRow> _rolls;
     private static int _pageIndex;
+    private static bool _hidePoAndPrefix;
 
     public static void Print(string printerName, SerializadoJobData job, List<SerializadoRollRow> rolls)
     {
-        using (PrintDocument doc = CreatePrintDocument(job, rolls))
+        Print(printerName, job, rolls, false);
+    }
+
+    public static void Print(string printerName, SerializadoJobData job, List<SerializadoRollRow> rolls, bool hidePoAndPrefix)
+    {
+        using (PrintDocument doc = CreatePrintDocument(job, rolls, hidePoAndPrefix))
         {
             doc.PrinterSettings.PrinterName = printerName;
             doc.Print();
@@ -4320,11 +6030,21 @@ public static class SerializadoConsecutivoPrinter
 
     public static void ShowPreview(IWin32Window owner, SerializadoJobData job, List<SerializadoRollRow> rolls)
     {
-        using (SerializadoConsecutivoPreviewForm frm = new SerializadoConsecutivoPreviewForm(job, rolls))
+        ShowPreview(owner, job, rolls, false);
+    }
+
+    public static void ShowPreview(IWin32Window owner, SerializadoJobData job, List<SerializadoRollRow> rolls, bool hidePoAndPrefix)
+    {
+        using (SerializadoConsecutivoPreviewForm frm = new SerializadoConsecutivoPreviewForm(job, rolls, hidePoAndPrefix))
             frm.ShowDialog(owner);
     }
 
     public static bool TrySaveAsPdf(SerializadoJobData job, List<SerializadoRollRow> rolls, string pdfPath, out string error)
+    {
+        return TrySaveAsPdf(job, rolls, pdfPath, false, out error);
+    }
+
+    public static bool TrySaveAsPdf(SerializadoJobData job, List<SerializadoRollRow> rolls, string pdfPath, bool hidePoAndPrefix, out string error)
     {
         error = string.Empty;
         if (string.IsNullOrWhiteSpace(pdfPath))
@@ -4342,7 +6062,7 @@ public static class SerializadoConsecutivoPrinter
 
         try
         {
-            using (PrintDocument doc = CreatePrintDocument(job, rolls))
+            using (PrintDocument doc = CreatePrintDocument(job, rolls, hidePoAndPrefix))
             {
                 doc.PrinterSettings.PrinterName = pdfPrinter;
                 doc.PrinterSettings.PrintToFile = true;
@@ -4376,9 +6096,15 @@ public static class SerializadoConsecutivoPrinter
 
     private static PrintDocument CreatePrintDocument(SerializadoJobData job, List<SerializadoRollRow> rolls)
     {
+        return CreatePrintDocument(job, rolls, false);
+    }
+
+    private static PrintDocument CreatePrintDocument(SerializadoJobData job, List<SerializadoRollRow> rolls, bool hidePoAndPrefix)
+    {
         _job = job;
         _rolls = rolls;
         _pageIndex = 0;
+        _hidePoAndPrefix = hidePoAndPrefix;
 
         PrintDocument doc = new PrintDocument();
         doc.DefaultPageSettings.Landscape = true;
@@ -4389,10 +6115,15 @@ public static class SerializadoConsecutivoPrinter
 
     private static void Doc_PrintPage(object sender, PrintPageEventArgs e)
     {
-        RenderPage(e, _job, _rolls, ref _pageIndex);
+        RenderPage(e, _job, _rolls, ref _pageIndex, _hidePoAndPrefix);
     }
 
     internal static void RenderPage(PrintPageEventArgs e, SerializadoJobData job, List<SerializadoRollRow> rolls, ref int pageIndex)
+    {
+        RenderPage(e, job, rolls, ref pageIndex, false);
+    }
+
+    internal static void RenderPage(PrintPageEventArgs e, SerializadoJobData job, List<SerializadoRollRow> rolls, ref int pageIndex, bool hidePoAndPrefix)
     {
         Graphics g = e.Graphics;
         Rectangle bounds = e.MarginBounds;
@@ -4433,20 +6164,36 @@ public static class SerializadoConsecutivoPrinter
 
             y = Math.Max(headerTop + 44f, metaY + metaRowH + 8f);
 
-            string[] headers = new string[]
+            string[] headers;
+            string[] values;
+            float[] widths;
+            if (hidePoAndPrefix)
             {
-                "PO", "JOB", "No de parte", "Cliente", "Cantidad Total", "Cantidad de rollos"
-            };
-            string[] values = new string[]
+                headers = new string[] { "JOB", "No de parte", "Cliente", "Cantidad Total", "Cantidad de rollos" };
+                values = new string[]
+                {
+                    job.JobNum,
+                    job.PartNum,
+                    job.Cliente,
+                    ((int)Math.Round(job.TotalQty, 0)).ToString("N0"),
+                    rolls.Count.ToString()
+                };
+                widths = new float[] { 0.12f, 0.32f, 0.14f, 0.21f, 0.21f };
+            }
+            else
             {
-                job.PurchaseOrder,
-                job.JobNum,
-                job.PartNum,
-                job.Cliente,
-                ((int)Math.Round(job.TotalQty, 0)).ToString("N0"),
-                rolls.Count.ToString()
-            };
-            float[] widths = new float[] { 0.14f, 0.10f, 0.28f, 0.12f, 0.18f, 0.18f };
+                headers = new string[] { "PO", "JOB", "No de parte", "Cliente", "Cantidad Total", "Cantidad de rollos" };
+                values = new string[]
+                {
+                    job.PurchaseOrder,
+                    job.JobNum,
+                    job.PartNum,
+                    job.Cliente,
+                    ((int)Math.Round(job.TotalQty, 0)).ToString("N0"),
+                    rolls.Count.ToString()
+                };
+                widths = new float[] { 0.14f, 0.10f, 0.28f, 0.12f, 0.18f, 0.18f };
+            }
             float headerH = 30f;
             float rowH = 32f;
             float x = bounds.Left;
@@ -4468,8 +6215,18 @@ public static class SerializadoConsecutivoPrinter
 
             y += rowH + 18f;
 
-            string[] dHeaders = new string[] { "Rollo /\nNumero", "", "De", "A", "Cantidad", "Defectos en\nRollos" };
-            float[] dWidths = new float[] { 0.13f, 0.05f, 0.20f, 0.20f, 0.17f, 0.25f };
+            string[] dHeaders;
+            float[] dWidths;
+            if (hidePoAndPrefix)
+            {
+                dHeaders = new string[] { "Rollo /\nNumero", "De", "A", "Cantidad", "Defectos en\nRollos" };
+                dWidths = new float[] { 0.15f, 0.22f, 0.22f, 0.18f, 0.23f };
+            }
+            else
+            {
+                dHeaders = new string[] { "Rollo /\nNumero", "", "De", "A", "Cantidad", "Defectos en\nRollos" };
+                dWidths = new float[] { 0.13f, 0.05f, 0.20f, 0.20f, 0.17f, 0.25f };
+            }
             float detailHeaderH = 40f;
             x = bounds.Left;
             for (int i = 0; i < dHeaders.Length; i++)
@@ -4487,15 +6244,30 @@ public static class SerializadoConsecutivoPrinter
             {
                 SerializadoRollRow roll = rolls[r];
                 x = bounds.Left;
-                string[] cells = new string[]
+                string[] cells;
+                if (hidePoAndPrefix)
                 {
-                    roll.RollNum.ToString(),
-                    roll.Prefix,
-                    roll.SerialFrom.ToString(),
-                    roll.SerialTo.ToString(),
-                    roll.Quantity.ToString("N0"),
-                    string.IsNullOrWhiteSpace(roll.Defectos) ? string.Empty : roll.Defectos.Trim()
-                };
+                    cells = new string[]
+                    {
+                        roll.RollNum.ToString(),
+                        roll.SerialFrom.ToString(),
+                        roll.SerialTo.ToString(),
+                        roll.Quantity.ToString("N0"),
+                        string.IsNullOrWhiteSpace(roll.Defectos) ? string.Empty : roll.Defectos.Trim()
+                    };
+                }
+                else
+                {
+                    cells = new string[]
+                    {
+                        roll.RollNum.ToString(),
+                        roll.Prefix,
+                        roll.SerialFrom.ToString(),
+                        roll.SerialTo.ToString(),
+                        roll.Quantity.ToString("N0"),
+                        string.IsNullOrWhiteSpace(roll.Defectos) ? string.Empty : roll.Defectos.Trim()
+                    };
+                }
                 for (int i = 0; i < cells.Length; i++)
                 {
                     float w = contentW * dWidths[i];
