@@ -56,6 +56,8 @@
 // v3.35: PRIORIDAD UI — reintentos solo si combo visible; Timer 300ms post-asignación (patrón BAQ Report)
 // v3.36: PRIORIDAD compile — EpiUltraCombo solo Value/Text (sin ValueList/SelectedIndex)
 // v3.37: PRIORIDAD — dataView en AddRow, ForceRefreshList, oTrans.Refresh, tras Part/adapter
+// v3.38: FT visible todos los usuarios — TryApply verifica UI real; control cache + búsqueda; repintado 300/800ms
+// v3.39: PRIORIDAD — quita oTrans.Refresh (borraba NORMAL); Timer 300/700ms; AddRow dataView; sync consulta job
 // **************************************************
 
 extern alias Erp_Contracts_BO_JobEntry;
@@ -142,6 +144,8 @@ public class Script
     private Control _prioridadControl;
     private EpiUltraCombo _cmbPrioridad;
     private bool _prioridadClearAfterSave;
+    private Control _ftCorridaControl;
+    private int _ftUiVerifyGeneration;
 
     private string _moqViolationHandledSig;
     private string _moqTrackedJobNum;
@@ -176,8 +180,8 @@ public class Script
     private const int MaxFtConsultAttempts = 5;
     private const int MaxDeferredFtAttempts = 4;
     private const int MaxValidacionRefreshAttempts = 4;
-    private const int MaxHiddenFieldApplyAttempts = 2;
-    private const int MaxFtFieldApplyAttempts = 4;
+    private const int MaxHiddenFieldApplyAttempts = 4;
+    private const int MaxFtFieldApplyAttempts = 8;
     private const int MaxQuantityWireAttempts = 10;
     private const int MaxPrioridadApplyAttempts = 12;
 
@@ -443,6 +447,8 @@ public class Script
             || n.IndexOf("lbaelft", StringComparison.Ordinal) >= 0)
             return true;
         if (n.IndexOf("moq", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("prioridad", StringComparison.Ordinal) >= 0)
             return true;
 
         return false;
@@ -801,7 +807,7 @@ public class Script
                             {
                                 string cachedFt;
                                 if (JobEntryBaqCache.TryGetFtBaQ(jobNum.Trim(), out cachedFt)
-                                    && !string.IsNullOrWhiteSpace(cachedFt))
+                                    && IsUsableFtBaQDisplay(cachedFt))
                                     RepaintFtCorridaFromCache(jobNum.Trim());
                             }
                         }
@@ -1231,17 +1237,35 @@ public class Script
         SuppressFtClearDuringJobLoad();
         _pendingFtDisplayValue = ftText;
         _ftConsultJobNum = jobnum;
-        _lastLoadedFtJobNum = jobnum;
 
         EnsureProtectedJobEntryFieldsVisible();
-        if (!TryApplyFtCorridaField(ftText))
+        InvalidateFtCorridaControlCache();
+        TryApplyFtCorridaField(ftText);
+
+        if (HasFtCorridaDisplayValue())
+            _lastLoadedFtJobNum = jobnum;
+        else
         {
             try
             {
-                epiNumericEditorC1.Text = ftText;
+                Control direct = epiNumericEditorC1 as Control;
+                if (direct != null)
+                {
+                    _ftCorridaControl = direct;
+                    TryApplyFtCorridaFieldOnControl(direct, ftText);
+                }
             }
             catch
             {
+            }
+
+            if (HasFtCorridaDisplayValue())
+                _lastLoadedFtJobNum = jobnum;
+            else
+            {
+                ScheduleApplyFtCorridaField(0);
+                ScheduleDelayedFtUiRefresh(jobnum, ftText, 300);
+                ScheduleDelayedFtUiRefresh(jobnum, ftText, 800);
             }
         }
     }
@@ -1372,6 +1396,8 @@ public class Script
         if (attempt + 1 >= MaxFtConsultAttempts)
         {
             ClearFtConsultInFlight(expectedJob);
+            if (!HasFtCorridaDisplayValue())
+                RepaintFtCorridaFromCache(expectedJob);
             return;
         }
 
@@ -1414,12 +1440,14 @@ public class Script
         _deferredFtGeneration++;
         _ftRefreshWhenReadyGeneration++;
         _ftWatchGeneration++;
+        _ftUiVerifyGeneration++;
         _ftWatchExpectedJob = string.Empty;
         _ftConsultInFlightJob = string.Empty;
         _lastLoadedFtJobNum = string.Empty;
         _ftConsultJobNum = string.Empty;
         _pendingFtDisplayValue = string.Empty;
         _pendingQtyMilForFt = -1m;
+        InvalidateFtCorridaControlCache();
         ForceClearFtCorridaUi();
     }
 
@@ -1811,21 +1839,87 @@ public class Script
         }
     }
 
+    private static bool IsLikelyFtCorridaControlName(string normalizedName)
+    {
+        if (string.IsNullOrEmpty(normalizedName))
+            return false;
+        if (normalizedName.IndexOf("epinumericeditorc1", StringComparison.Ordinal) >= 0)
+            return true;
+        if (normalizedName.IndexOf("ftcorrida", StringComparison.Ordinal) >= 0)
+            return true;
+        if (normalizedName.IndexOf("totalft", StringComparison.Ordinal) >= 0)
+            return true;
+        if (normalizedName.IndexOf("lbaelft", StringComparison.Ordinal) >= 0)
+            return true;
+        return false;
+    }
+
+    private Control FindFtCorridaControlRecursive(Control root)
+    {
+        if (root == null)
+            return null;
+
+        string n = NormalizeSearchText(root.Name);
+        if (IsLikelyFtCorridaControlName(n) && IsLikelyBoundEditor(root))
+            return root;
+
+        string t = NormalizeSearchText(root.Text);
+        if (t.IndexOf("total ft corrida", StringComparison.Ordinal) >= 0
+            || t.IndexOf("totalftcorrida", StringComparison.Ordinal) >= 0)
+        {
+            Control parent = root.Parent;
+            if (parent != null)
+            {
+                int startIndex = parent.Controls.IndexOf(root);
+                if (startIndex >= 0)
+                {
+                    for (int i = startIndex + 1; i < parent.Controls.Count; i++)
+                    {
+                        Control candidate = parent.Controls[i];
+                        if (IsLikelyBoundEditor(candidate))
+                            return candidate;
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < root.Controls.Count; i++)
+        {
+            Control found = FindFtCorridaControlRecursive(root.Controls[i]);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
     private Control GetFtCorridaControl()
     {
         try
         {
+            if (_ftCorridaControl != null && !_ftCorridaControl.IsDisposed)
+                return _ftCorridaControl;
+
             Control c = csm.GetNativeControlReference(FtCorridaControlEpGuid) as Control;
             if (c == null)
                 c = epiNumericEditorC1 as Control;
-            if (c == null)
+            if (c == null && JobEntryForm != null)
                 c = FindControlByName(JobEntryForm, "epiNumericEditorC1");
+            if (c == null && JobEntryForm != null)
+                c = FindFtCorridaControlRecursive(JobEntryForm);
+
+            if (c != null && !c.IsDisposed)
+                _ftCorridaControl = c;
             return c;
         }
         catch
         {
             return null;
         }
+    }
+
+    private void InvalidateFtCorridaControlCache()
+    {
+        _ftCorridaControl = null;
     }
 
     private string GetFtCorridaControlText()
@@ -2772,14 +2866,20 @@ public class Script
         return PrioridadFieldName;
     }
 
-    private void NotifyJobHeadUiRefresh()
+    private static bool IsPrioridadControlReady(Control control)
     {
+        if (control == null || control.IsDisposed || !control.Visible)
+            return false;
+        EpiUltraCombo combo = control as EpiUltraCombo;
+        if (combo == null)
+            return true;
         try
         {
-            oTrans.Refresh();
+            return combo.Rows != null && combo.Rows.Count > 0;
         }
         catch
         {
+            return true;
         }
     }
 
@@ -2853,19 +2953,17 @@ public class Script
                 else
                 {
                     string v = value.Trim();
+                    try { combo.ForceRefreshList(); } catch { }
                     combo.Value = v;
                     combo.Text = v;
-                    TrySelectPrioridadRowByText(combo, v);
-                    try
+                    if (!TrySelectPrioridadRowByText(combo, v))
                     {
-                        combo.ForceRefreshList();
-                    }
-                    catch
-                    {
+                        combo.Value = v;
+                        combo.Text = v;
                     }
                 }
                 combo.Refresh();
-                NotifyJobHeadUiRefresh();
+                combo.Update();
                 return HasPrioridadUiValue(value);
             }
 
@@ -2902,9 +3000,24 @@ public class Script
         _prioridadClearAfterSave = true;
         SetPrioridadDataValue(PrioridadDefaultValue);
         TryApplyPrioridadToControl(PrioridadDefaultValue);
-        NotifyJobHeadUiRefresh();
         ScheduleDelayedPrioridadUiRefresh(PrioridadDefaultValue, 300);
         ScheduleDelayedPrioridadUiRefresh(PrioridadDefaultValue, 700);
+    }
+
+    private void SyncPrioridadUiFromDataView()
+    {
+        if (edvJobHead == null || edvJobHead.Row < 0 || IsNewJobContext())
+            return;
+
+        string val = SafeDataViewString(edvJobHead, edvJobHead.Row, PrioridadFieldName);
+        if (string.IsNullOrWhiteSpace(val))
+            return;
+
+        if (HasPrioridadUiValue(val))
+            return;
+
+        TryApplyPrioridadToControl(val);
+        ScheduleDelayedPrioridadUiRefresh(val, 300);
     }
 
     private void SetPrioridadDefaultOnRow(EpiDataView view, int row)
@@ -3031,9 +3144,20 @@ public class Script
                 {
                     if (!IsNewJobContext())
                         return;
+
+                    EnsureProtectedJobEntryFieldsVisible();
+                    Control prioridadCtrl = GetPrioridadControl();
+                    if (prioridadCtrl == null || !prioridadCtrl.Visible)
+                    {
+                        if (attempt + 1 < MaxPrioridadApplyAttempts)
+                            ScheduleApplyPrioridadDefaultForNewJob(attempt + 1);
+                        return;
+                    }
+
                     if (HasPrioridadUiValue(PrioridadDefaultValue))
                         return;
 
+                    SetPrioridadDefaultOnRow(edvJobHead, edvJobHead.Row);
                     ApplyPrioridadDefaultForNewJob();
 
                     if (!HasPrioridadUiValue(PrioridadDefaultValue)
@@ -3244,6 +3368,7 @@ public class Script
                 break;
             case "ClearTool":
                 ResetFtCorridaForNewJob();
+                InvalidateFtCorridaControlCache();
                 _validacionRefreshGeneration++;
                 _pendingValidacionPart = string.Empty;
                 ApplyValidacionParteUi(string.Empty);
@@ -3804,16 +3929,29 @@ public class Script
     private void SetFtCorridaField(string value)
     {
         _pendingFtDisplayValue = value == null ? string.Empty : value.Trim();
+        if (!IsUsableFtBaQDisplay(_pendingFtDisplayValue))
+            _pendingFtDisplayValue = string.Empty;
+
         if (edvJobHead != null && edvJobHead.Row >= 0)
         {
             string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
             if (!string.IsNullOrWhiteSpace(jobNum))
                 _ftConsultJobNum = jobNum.Trim();
         }
+
         if (TryApplyFtCorridaField(_pendingFtDisplayValue))
+        {
+            if (IsUsableFtBaQDisplay(_pendingFtDisplayValue) && !string.IsNullOrWhiteSpace(_ftConsultJobNum))
+                _lastLoadedFtJobNum = _ftConsultJobNum;
             return;
+        }
 
         ScheduleApplyFtCorridaField(0);
+        if (IsUsableFtBaQDisplay(_pendingFtDisplayValue) && !string.IsNullOrWhiteSpace(_ftConsultJobNum))
+        {
+            ScheduleDelayedFtUiRefresh(_ftConsultJobNum, _pendingFtDisplayValue, 300);
+            ScheduleDelayedFtUiRefresh(_ftConsultJobNum, _pendingFtDisplayValue, 800);
+        }
     }
 
     private void ScheduleApplyFtCorridaField(int attempt)
@@ -3835,6 +3973,9 @@ public class Script
                         return;
                     if (attempt + 1 < MaxFtFieldApplyAttempts)
                         ScheduleApplyFtCorridaField(attempt + 1);
+                    else if (IsUsableFtBaQDisplay(_pendingFtDisplayValue)
+                        && !string.IsNullOrWhiteSpace(_ftConsultJobNum))
+                        RepaintFtCorridaFromCache(_ftConsultJobNum);
                 }
                 catch
                 {
@@ -3851,7 +3992,7 @@ public class Script
             }
 
             Timer retryTimer = new Timer();
-            retryTimer.Interval = Math.Min(80 + (attempt * 60), 600);
+            retryTimer.Interval = Math.Min(120 + (attempt * 80), 900);
             retryTimer.Tick += delegate(object s, EventArgs ev)
             {
                 retryTimer.Stop();
@@ -3867,40 +4008,78 @@ public class Script
         }
     }
 
+    private bool TryApplyFtCorridaFieldOnControl(Control c, string text)
+    {
+        if (c == null)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(text) && !IsUsableFtBaQDisplay(text))
+            text = string.Empty;
+
+        if (!c.Visible)
+            c.Visible = true;
+
+        EpiNumericEditor ne = c as EpiNumericEditor;
+        if (ne != null)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                ne.Value = null;
+                ne.Text = string.Empty;
+            }
+            else
+            {
+                decimal d;
+                if (TryParseDecimalFlexible(text, out d) && d > 0m)
+                {
+                    ne.Value = d;
+                    ne.Text = FormatFtDisplay(d);
+                }
+                else
+                    return false;
+            }
+            ne.Refresh();
+            return string.IsNullOrWhiteSpace(text) || HasFtCorridaDisplayValue();
+        }
+
+        Infragistics.Win.UltraWinEditors.UltraNumericEditor une =
+            c as Infragistics.Win.UltraWinEditors.UltraNumericEditor;
+        if (une != null)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                une.Value = null;
+                une.Text = string.Empty;
+            }
+            else
+            {
+                decimal d;
+                if (TryParseDecimalFlexible(text, out d) && d > 0m)
+                {
+                    une.Value = d;
+                    une.Text = FormatFtDisplay(d);
+                }
+                else
+                    return false;
+            }
+            une.Refresh();
+            return string.IsNullOrWhiteSpace(text) || HasFtCorridaDisplayValue();
+        }
+
+        c.Text = text ?? string.Empty;
+        c.Refresh();
+        return string.IsNullOrWhiteSpace(text) || HasFtCorridaDisplayValue();
+    }
+
     private bool TryApplyFtCorridaField(string text)
     {
         try
         {
+            EnsureProtectedJobEntryFieldsVisible();
             Control c = GetFtCorridaControl();
             if (c == null)
                 return false;
-
-            EpiNumericEditor ne = c as EpiNumericEditor;
-            if (ne != null)
-            {
-                if (string.IsNullOrWhiteSpace(text))
-                {
-                    ne.Value = null;
-                    ne.Text = string.Empty;
-                }
-                else
-                {
-                    decimal d;
-                    if (TryParseDecimalFlexible(text, out d))
-                    {
-                        ne.Value = d;
-                        ne.Text = FormatFtDisplay(d);
-                    }
-                    else
-                        ne.Text = text;
-                }
-                ne.Refresh();
-                return true;
-            }
-
-            c.Text = text ?? string.Empty;
-            c.Refresh();
-            return true;
+            return TryApplyFtCorridaFieldOnControl(c, text);
         }
         catch
         {
@@ -3908,9 +4087,63 @@ public class Script
         }
     }
 
+    private void ScheduleDelayedFtUiRefresh(string expectedJob, string value, int delayMs)
+    {
+        if (!ShouldRunRuntimeUiLogic() || !IsUsableFtBaQDisplay(value))
+            return;
+
+        expectedJob = expectedJob == null ? string.Empty : expectedJob.Trim();
+        value = value.Trim();
+        int generation = ++_ftUiVerifyGeneration;
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed)
+                return;
+
+            Timer delayTimer = new Timer();
+            delayTimer.Interval = Math.Max(100, delayMs);
+            delayTimer.Tick += delegate(object s, EventArgs ev)
+            {
+                delayTimer.Stop();
+                delayTimer.Dispose();
+                if (generation != _ftUiVerifyGeneration)
+                    return;
+                if (HasFtCorridaDisplayValue())
+                    return;
+
+                string currentJob = string.Empty;
+                if (edvJobHead != null && edvJobHead.Row >= 0)
+                    currentJob = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
+                if (expectedJob.Length > 0 && currentJob.Length > 0
+                    && !string.Equals(currentJob, expectedJob, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                _pendingFtDisplayValue = value;
+                InvalidateFtCorridaControlCache();
+                EnsureProtectedJobEntryFieldsVisible();
+                TryApplyFtCorridaField(value);
+                if (HasFtCorridaDisplayValue())
+                {
+                    if (expectedJob.Length > 0)
+                        _lastLoadedFtJobNum = expectedJob;
+                    return;
+                }
+
+                if (expectedJob.Length > 0)
+                    RepaintFtCorridaFromCache(expectedJob);
+            };
+            delayTimer.Start();
+        }
+        catch
+        {
+        }
+    }
+
     private static bool IsStaleFtCacheValue(string value)
     {
-        return string.IsNullOrWhiteSpace(value);
+        return !IsUsableFtBaQDisplay(value);
     }
 
     private string QueryFtBaQ(string jobNum)
@@ -4341,7 +4574,6 @@ public class Script
             if (string.IsNullOrWhiteSpace(initJobNum))
             {
                 ResetFtCorridaForNewJob();
-                SetPrioridadDefaultOnRow(view, args.Row);
                 ScheduleApplyPrioridadDefaultForNewJob(0);
             }
             else
@@ -4380,11 +4612,13 @@ public class Script
             if (string.IsNullOrWhiteSpace(loadJobNum))
             {
                 ResetFtCorridaForNewJob();
-                SetPrioridadDefaultOnRow(view, args.Row);
                 ScheduleApplyPrioridadDefaultForNewJob(0);
             }
             else
+            {
                 RequestFtConsultForJob(loadJobNum);
+                SyncPrioridadUiFromDataView();
+            }
 
             ScheduleDeferredJobHeadLoad(view, args.Row);
             RehideKnownJobEntryFields();

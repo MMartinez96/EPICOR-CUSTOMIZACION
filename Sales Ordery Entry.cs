@@ -9,6 +9,16 @@
 //   NO NACIONAL  → solo permite FLX-IMMX / FLX-NORM (bloquea COMER, MUESTRA, OFF_IMMX, OFF_NORM, etc.)
 //   Ship To con Embarca vacío = domicilio principal Epicor (válido en CFXJZ y demás plantas)
 // v3.9: Parte SERVURG excluida de validación NACIONAL/NO NACIONAL e IMMEX ProdCode (OV, factura, etc.)
+// v4.0: Moneda OV bloqueada = moneda del cliente (UI + validación al guardar; evita USD por error)
+// v4.1: Bloqueo combo moneda en toolbar (_sbtCurrencyToggle / Currency*)
+// v4.2: PSCurrCode e InvCurrCode en Header > Detail — solo lectura
+// v4.3: Pack Slip Currency — búsqueda por DataField + bloqueo reforzado
+// v4.4: Pack Slip — bloquea TODOS los controles PSCurrCode/InvCurrCode en el form
+// v4.5: C1417 COPELAND Ship To 1 (El Paso USA) excluido de validación NACIONAL/NO NACIONAL
+// v4.6: C724 REGAL BELOIT Ship To 1 BRES GROUP (Eagle Pass USA) excluido — exportación
+// v4.7: MOQ CFXJZ — valida al cargar línea, al salir de cantidad y al guardar; qty desde DataView
+// v4.8: MOQ solo planta CFXJZ — CFXCH (y demás sites) sin restricción MOQ
+// v4.9: C485 THERMO-DISC Ship To NACIONAL (COMPONENTES AVANZADOS DE MEXICO, Delicias CHH) excluido — validación NACIONAL/NO NACIONAL e IMMEX ProdCode
 // Copiar este contenido al Script de personalización de Epicor.
 // **************************************************
 
@@ -43,7 +53,9 @@ using Ice.Lib.Framework;
 using Ice.Lib.Searches;
 using System.Drawing;
 using System.Linq;
+using System.Reflection;
 using System.Text;
+using Infragistics.Win.UltraWinToolbars;
 
 public class Script
 {
@@ -59,6 +71,13 @@ public class Script
 	private EpiTextBox txtShipToNumControl;
 	private EpiTextBox txtShipToCustIdControl;
 	private bool _clearingOrderDtlLine;
+	private Control _currencyControl;
+	private Control _psCurrControl;
+	private Control _invCurrControl;
+	private bool _psCurrLockHandlerAttached;
+
+	private const string PSCurrCodeControlGuid = "077600b3-005e-4d2e-acbd-1578ebb23407";
+	private const string InvCurrCodeControlGuid = "ad7d53be-413c-40da-89c2-bf38d2131a8a";
 
 	public void InitializeCustomCode()
 	{
@@ -69,6 +88,7 @@ public class Script
 		this.edvOrderDtl.EpiViewNotification += new EpiViewNotification(this.edvOrderDtl_EpiViewNotification);
 		this.baseToolbarsManager.ToolClick += new Infragistics.Win.UltraWinToolbars.ToolClickEventHandler(this.baseToolbarsManager_ToolClick);
 		this.edvOrderHed = ((EpiDataView)(this.oTrans.EpiDataViews["OrderHed"]));
+		this.edvOrderHed.EpiViewNotification += new EpiViewNotification(this.edvOrderHed_EpiViewNotification_Currency);
 		this.oTrans_ordAdapter = ((EpiBaseAdapter)(this.csm.TransAdaptersHT["oTrans_ordAdapter"]));
 		this.oTrans_ordAdapter.BeforeAdapterMethod += new BeforeAdapterMethod(this.oTrans_ordAdapter_BeforeAdapterMethod);
 		// End Wizard Added Variable Initialization
@@ -109,6 +129,10 @@ public class Script
 		this.txtUPartNum.KeyUp -= new System.Windows.Forms.KeyEventHandler(this.txtUPartNum_KeyUp);
 		this.edvOrderDtl.EpiViewNotification -= new EpiViewNotification(this.edvOrderDtl_EpiViewNotification);
 		this.edvOrderDtl = null;
+		if (this.edvOrderHed != null)
+		{
+			this.edvOrderHed.EpiViewNotification -= new EpiViewNotification(this.edvOrderHed_EpiViewNotification_Currency);
+		}
 		this.baseToolbarsManager.ToolClick -= new Infragistics.Win.UltraWinToolbars.ToolClickEventHandler(this.baseToolbarsManager_ToolClick);
 		this.txtUPartNum.Validated -= new System.EventHandler(this.txtUPartNum_Validated);
 		this.oTrans_ordAdapter.BeforeAdapterMethod -= new BeforeAdapterMethod(this.oTrans_ordAdapter_BeforeAdapterMethod);
@@ -128,6 +152,10 @@ public class Script
 
 		txtShipToNumControl = null;
 		txtShipToCustIdControl = null;
+		_currencyControl = null;
+		_psCurrControl = null;
+		_invCurrControl = null;
+		_psCurrLockHandlerAttached = false;
 
 		if (ventacantidad != null)
 		{
@@ -225,12 +253,29 @@ public class Script
 
 	private const string ImmexValidationVersion = "3.1";
 	private const string NacionalValidationVersion = "3.9";
+	private const string CurrencyLockVersion = "4.4";
+	private const string DefaultOrderCurrencyCode = "MXN";
+	private const string MoqPlantId = "CFXJZ";
+	private const string MoqExcludedPlantId = "CFXCH";
+	private const string MoqBaqName = "nummoc_c_ACTUALIZABLE";
 
 	// Cliente excluido de TODA validación NACIONAL/NO NACIONAL e IMMEX ProdCode
 	private const string ExcludedCustIdCodiflex = "C094";
 
 	// Parte excluida de TODA validación NACIONAL/NO NACIONAL e IMMEX ProdCode
 	private const string ExcludedPartNumServUrg = "SERVURG";
+
+	// C1417 COPELAND — Ship To 1 (1281 Joe Battle, El Paso TX) sin restricción ProdCode
+	private const string ExcludedCopelandCustId = "C1417";
+	private const string ExcludedCopelandShipToNum = "1";
+
+	// C724 REGAL BELOIT — Ship To 1 BRES GROUP (1746 Brown St, Eagle Pass TX USA) exportación
+	private const string ExcludedRegalCustId = "C724";
+	private const string ExcludedRegalShipToNum = "1";
+
+	// C485 THERMO-DISC — Ship To NACIONAL (COMPONENTES AVANZADOS DE MEXICO, Delicias CHH)
+	private const string ExcludedThermoDiscCustId = "C485";
+	private const string ExcludedThermoDiscShipToNum = "NACIONAL";
 
 	// Listado autorizado — validación NACIONAL / NO NACIONAL solo por NÚMERO CLIENTE (CustID)
 	// NOTA: C094 CODIFLEX INC no está en el listado (excluido por completo)
@@ -279,9 +324,47 @@ public class Script
 		return string.Equals(partNum.Trim(), ExcludedPartNumServUrg, StringComparison.OrdinalIgnoreCase);
 	}
 
+	private bool IsCopelandExcludedShipTo()
+	{
+		return IsExcludedCustShipTo(ExcludedCopelandCustId, ExcludedCopelandShipToNum);
+	}
+
+	private bool IsRegalExcludedShipTo()
+	{
+		return IsExcludedCustShipTo(ExcludedRegalCustId, ExcludedRegalShipToNum);
+	}
+/////////////////////////////////THERMODISC DELICIAS/////////////////////////////////////////
+	private bool IsThermoDiscExcludedShipTo()
+	{
+		return IsExcludedCustShipTo(ExcludedThermoDiscCustId, ExcludedThermoDiscShipToNum);
+	}
+
+	private bool IsExcludedCustShipTo(string excludedCustId, string excludedShipToNum)
+	{
+		string custId = ResolveShipToCustId();
+		if (string.IsNullOrWhiteSpace(custId))
+			custId = ResolveSoldToCustId();
+		if (string.IsNullOrWhiteSpace(custId))
+			return false;
+
+		if (!string.Equals(custId.Trim(), excludedCustId, StringComparison.OrdinalIgnoreCase))
+			return false;
+
+		return string.Equals(ResolveShipToNum().Trim(), excludedShipToNum, StringComparison.OrdinalIgnoreCase);
+	}
+
 	private bool ShouldApplyNacionalProdCodeValidation()
 	{
 		if (IsCodiflexIncExcludedCustomer())
+			return false;
+
+		if (IsCopelandExcludedShipTo())
+			return false;
+
+		if (IsRegalExcludedShipTo())
+			return false;
+
+		if (IsThermoDiscExcludedShipTo())
 			return false;
 
 		return IsNacionalValidationCustomer(ResolveShipToCustId())
@@ -664,6 +747,393 @@ public class Script
 		return false;
 	}
 
+	private string ResolveCustomerCurrencyCode()
+	{
+		try
+		{
+			EpiDataView custView = this.oTrans.EpiDataViews["Customer"] as EpiDataView;
+			if (custView != null && custView.dataView != null && custView.Row >= 0)
+			{
+				string cur = GetDataRowString(custView.dataView[custView.Row].Row, "CurrencyCode");
+				if (!string.IsNullOrWhiteSpace(cur))
+					return cur.Trim().ToUpperInvariant();
+			}
+		}
+		catch
+		{
+		}
+
+		string hedCur = GetOrderHedValue("CurrencyCode");
+		if (!string.IsNullOrWhiteSpace(hedCur))
+			return hedCur.Trim().ToUpperInvariant();
+
+		return DefaultOrderCurrencyCode;
+	}
+
+	private void ApplyOrderCurrencyFromCustomer()
+	{
+		if (edvOrderHed == null || edvOrderHed.Row < 0 || edvOrderHed.dataView == null)
+			return;
+
+		string custCur = ResolveCustomerCurrencyCode();
+		if (string.IsNullOrWhiteSpace(custCur))
+			custCur = DefaultOrderCurrencyCode;
+
+		DataRow row = edvOrderHed.dataView[edvOrderHed.Row].Row;
+		if (row == null || row.RowState == DataRowState.Deleted)
+			return;
+
+		if (!row.Table.Columns.Contains("CurrencyCode"))
+			return;
+
+		string current = GetOrderHedValue("CurrencyCode");
+		if (string.Equals(current, custCur, StringComparison.OrdinalIgnoreCase))
+			return;
+
+		row.BeginEdit();
+		row["CurrencyCode"] = custCur;
+		row.EndEdit();
+	}
+
+	private static string GetControlDataField(Control control)
+	{
+		if (control == null)
+			return string.Empty;
+
+		try
+		{
+			PropertyInfo pi = control.GetType().GetProperty("DataField");
+			if (pi != null)
+			{
+				object value = pi.GetValue(control, null);
+				return value == null ? string.Empty : value.ToString().Trim();
+			}
+		}
+		catch
+		{
+		}
+
+		return string.Empty;
+	}
+
+	private static void CollectControls(Control parent, System.Collections.Generic.List<Control> list)
+	{
+		if (parent == null || list == null)
+			return;
+
+		list.Add(parent);
+		foreach (Control child in parent.Controls)
+			CollectControls(child, list);
+	}
+
+	private Control FindControlByDataField(Control root, string dataField)
+	{
+		if (root == null || string.IsNullOrWhiteSpace(dataField))
+			return null;
+
+		System.Collections.Generic.List<Control> all = new System.Collections.Generic.List<Control>();
+		CollectControls(root, all);
+
+		for (int i = 0; i < all.Count; i++)
+		{
+			if (string.Equals(GetControlDataField(all[i]), dataField, StringComparison.OrdinalIgnoreCase))
+				return all[i];
+		}
+
+		return null;
+	}
+
+	private Control FindControlByNameFragment(Control root, string fragment)
+	{
+		if (root == null || string.IsNullOrWhiteSpace(fragment))
+			return null;
+
+		System.Collections.Generic.List<Control> all = new System.Collections.Generic.List<Control>();
+		CollectControls(root, all);
+
+		for (int i = 0; i < all.Count; i++)
+		{
+			string name = all[i].Name ?? string.Empty;
+			if (name.IndexOf(fragment, StringComparison.OrdinalIgnoreCase) >= 0)
+				return all[i];
+		}
+
+		return null;
+	}
+
+	private void LockAllControlsWithDataField(Control root, string dataField)
+	{
+		if (root == null || string.IsNullOrWhiteSpace(dataField))
+			return;
+
+		System.Collections.Generic.List<Control> all = new System.Collections.Generic.List<Control>();
+		CollectControls(root, all);
+
+		for (int i = 0; i < all.Count; i++)
+		{
+			if (string.Equals(GetControlDataField(all[i]), dataField, StringComparison.OrdinalIgnoreCase))
+				SetDetailCurrencyControlReadOnly(all[i], true);
+		}
+	}
+
+	private static void DisableToolbarTool(ToolBase tool)
+	{
+		if (tool == null)
+			return;
+
+		tool.SharedProps.Enabled = false;
+
+		ComboBoxTool combo = tool as ComboBoxTool;
+		if (combo != null)
+		{
+			try { combo.DropDownStyle = Infragistics.Win.DropDownStyle.DropDownList; }
+			catch { }
+		}
+	}
+
+	private void LockCurrencyToolbarTools()
+	{
+		if (baseToolbarsManager == null)
+			return;
+
+		string[] keys = new string[]
+		{
+			"_sbtCurrencyToggle",
+			"CurrencyCode",
+			"DocCurrencyCode",
+			"curCurrencyCode",
+			"CurrencyToggle"
+		};
+
+		for (int i = 0; i < keys.Length; i++)
+		{
+			if (baseToolbarsManager.Tools.Exists(keys[i]))
+				DisableToolbarTool(baseToolbarsManager.Tools[keys[i]]);
+		}
+
+		foreach (ToolBase tool in baseToolbarsManager.Tools)
+		{
+			if (tool == null)
+				continue;
+
+			string key = tool.Key ?? string.Empty;
+			if (key.IndexOf("Currency", StringComparison.OrdinalIgnoreCase) >= 0
+				|| key.IndexOf("Curr", StringComparison.OrdinalIgnoreCase) >= 0)
+			{
+				DisableToolbarTool(tool);
+			}
+		}
+	}
+
+	private void LockCurrencyUiControl()
+	{
+		if (_currencyControl == null && SalesOrderForm != null && !SalesOrderForm.IsDisposed)
+		{
+			_currencyControl = FindControlByDataField(SalesOrderForm, "CurrencyCode");
+			if (_currencyControl == null)
+				_currencyControl = FindControlByDataField(SalesOrderForm, "DocCurrencyCode");
+			if (_currencyControl == null)
+				_currencyControl = FindControlByNameFragment(SalesOrderForm, "Currency");
+		}
+
+		if (_currencyControl != null)
+			SetControlReadOnly(_currencyControl, true);
+
+		LockCurrencyToolbarTools();
+	}
+
+	private void LockDetailCurrencyControls()
+	{
+		if (SalesOrderForm != null && !SalesOrderForm.IsDisposed)
+		{
+			LockAllControlsWithDataField(SalesOrderForm, "PSCurrCode");
+			LockAllControlsWithDataField(SalesOrderForm, "InvCurrCode");
+
+			if (_psCurrControl == null || _psCurrControl.Enabled)
+			{
+				_psCurrControl = csm.GetNativeControlReference(PSCurrCodeControlGuid) as Control;
+				if (_psCurrControl == null)
+					_psCurrControl = FindControlByDataField(SalesOrderForm, "PSCurrCode");
+				if (_psCurrControl == null)
+					_psCurrControl = FindControlByNameFragment(SalesOrderForm, "PSCurr");
+			}
+
+			if (_invCurrControl == null)
+			{
+				_invCurrControl = csm.GetNativeControlReference(InvCurrCodeControlGuid) as Control;
+				if (_invCurrControl == null)
+					_invCurrControl = FindControlByDataField(SalesOrderForm, "InvCurrCode");
+			}
+		}
+
+		EnsurePsCurrLockHandler(_psCurrControl);
+		SetDetailCurrencyControlReadOnly(_psCurrControl, true);
+		SetDetailCurrencyControlReadOnly(_invCurrControl, true);
+	}
+
+	private void EnsurePsCurrLockHandler(Control control)
+	{
+		if (control == null || _psCurrLockHandlerAttached)
+			return;
+
+		control.BackColorChanged += new EventHandler(PsCurrControl_BackColorChanged);
+		_psCurrLockHandlerAttached = true;
+	}
+
+	private void PsCurrControl_BackColorChanged(object sender, EventArgs e)
+	{
+		SetDetailCurrencyControlReadOnly(sender as Control, true);
+	}
+
+	private static void SetDetailCurrencyControlReadOnly(Control control, bool readOnly)
+	{
+		if (control == null)
+			return;
+
+		try
+		{
+			PropertyInfo pi = control.GetType().GetProperty("ReadOnly");
+			if (pi != null && pi.CanWrite)
+				pi.SetValue(control, readOnly, null);
+		}
+		catch
+		{
+		}
+
+		control.Enabled = !readOnly;
+
+		try
+		{
+			PropertyInfo dropPi = control.GetType().GetProperty("DropDownStyle");
+			if (dropPi != null && readOnly)
+				dropPi.SetValue(control, Infragistics.Win.DropDownStyle.DropDownList, null);
+		}
+		catch
+		{
+		}
+	}
+
+	private static void SetControlReadOnly(Control control, bool readOnly)
+	{
+		if (control == null)
+			return;
+
+		try
+		{
+			PropertyInfo pi = control.GetType().GetProperty("ReadOnly");
+			if (pi != null && pi.CanWrite)
+			{
+				pi.SetValue(control, readOnly, null);
+				return;
+			}
+		}
+		catch
+		{
+		}
+
+		control.Enabled = !readOnly;
+	}
+
+	private static string GetEpiNotifyColumnName(EpiDataView view, EpiNotifyArgs args)
+	{
+		try
+		{
+			if (view == null || view.dataView == null || view.dataView.Table == null || args == null)
+				return string.Empty;
+
+			object colRaw = args.Column;
+			DataColumn dc = colRaw as DataColumn;
+			if (dc != null)
+				return dc.ColumnName;
+
+			int idx = -1;
+			if (colRaw != null)
+			{
+				try { idx = Convert.ToInt32(colRaw); }
+				catch { return string.Empty; }
+			}
+
+			if (idx >= 0 && idx < view.dataView.Table.Columns.Count)
+				return view.dataView.Table.Columns[idx].ColumnName;
+		}
+		catch
+		{
+		}
+
+		return string.Empty;
+	}
+
+	private void EnforceOrderCurrencyLock()
+	{
+		ApplyOrderCurrencyFromCustomer();
+		LockCurrencyUiControl();
+		LockDetailCurrencyControls();
+	}
+
+	private void edvOrderHed_EpiViewNotification_Currency(EpiDataView view, EpiNotifyArgs args)
+	{
+		if (view == null || args == null)
+			return;
+
+		ApplyOrderCurrencyFromCustomer();
+
+		if (args.NotifyType == EpiTransaction.NotifyType.Initialize)
+		{
+			LockCurrencyUiControl();
+			LockDetailCurrencyControls();
+			return;
+		}
+
+		string col = GetEpiNotifyColumnName(view, args);
+		if (!string.IsNullOrWhiteSpace(col))
+		{
+			col = col.Trim();
+			if (string.Equals(col, "CustNum", StringComparison.OrdinalIgnoreCase)
+				|| string.Equals(col, "BTCustNum", StringComparison.OrdinalIgnoreCase)
+				|| string.Equals(col, "CustID", StringComparison.OrdinalIgnoreCase)
+				|| string.Equals(col, "CustomerCustID", StringComparison.OrdinalIgnoreCase)
+				|| string.Equals(col, "CurrencyCode", StringComparison.OrdinalIgnoreCase))
+			{
+				ApplyOrderCurrencyFromCustomer();
+				LockCurrencyUiControl();
+				LockDetailCurrencyControls();
+			}
+		}
+	}
+
+	private void ValidateOrderCurrencyOnSave()
+	{
+		if (edvOrderHed == null || edvOrderHed.Row < 0)
+			return;
+
+		string custCur = ResolveCustomerCurrencyCode();
+		if (string.IsNullOrWhiteSpace(custCur))
+			custCur = DefaultOrderCurrencyCode;
+
+		string ordCur = GetOrderHedValue("CurrencyCode");
+		if (string.IsNullOrWhiteSpace(ordCur))
+			ordCur = custCur;
+
+		ordCur = ordCur.Trim().ToUpperInvariant();
+
+		if (!string.Equals(ordCur, custCur, StringComparison.OrdinalIgnoreCase))
+		{
+			throw new UIException(
+				"[Moneda v" + CurrencyLockVersion + "] La moneda de la orden (" + ordCur + ") "
+				+ "no coincide con la moneda del cliente (" + custCur + ").\r\n\r\n"
+				+ "No se permite cambiar la moneda manualmente. "
+				+ "Si el cliente debe facturarse en otra moneda, corrija el maestro de Cliente o contacte a Finanzas.");
+		}
+
+		if (string.Equals(custCur, DefaultOrderCurrencyCode, StringComparison.OrdinalIgnoreCase)
+			&& !string.Equals(ordCur, DefaultOrderCurrencyCode, StringComparison.OrdinalIgnoreCase))
+		{
+			throw new UIException(
+				"[Moneda v" + CurrencyLockVersion + "] Este cliente factura en PESOS (MXN). "
+				+ "No se puede guardar la orden en " + ordCur + ".");
+		}
+	}
+
 	private void ValidateNacionalProdCodesOnSave()
 	{
 		if (edvOrderDtl == null || edvOrderDtl.dataView == null)
@@ -791,23 +1261,177 @@ public class Script
 
 	private void ventacantidad_Leave(object sender, EventArgs e)
 	{
-		string currentPlant = ((Ice.Core.Session)oTrans.Session).PlantID;
+		if (edvOrderDtl == null || edvOrderDtl.Row < 0)
+			return;
 
-		if (currentPlant == "CFXJZ")
+		string part = edvOrderDtl.dataView[edvOrderDtl.Row]["PartNum"].ToString();
+		if (string.IsNullOrWhiteSpace(part))
+			return;
+
+		if (!ShouldApplyMoqValidation())
+			return;
+
+		VALIDARCANTIDADVENTA(part);
+	}
+
+	private string ResolveOrderPlant()
+	{
+		string plant = GetOrderHedValue("Plant");
+		if (!string.IsNullOrWhiteSpace(plant))
+			return plant.Trim();
+
+		if (edvOrderDtl != null && edvOrderDtl.Row >= 0 && edvOrderDtl.dataView != null)
 		{
-			if (edvOrderDtl == null || edvOrderDtl.Row < 0)
-				return;
-
-			string part = edvOrderDtl.dataView[edvOrderDtl.Row]["PartNum"].ToString();
-			if (string.IsNullOrWhiteSpace(part))
-				return;
-
-			VALIDARCANTIDADVENTA(part);
+			plant = GetOrderDtlRowString(edvOrderDtl.dataView[edvOrderDtl.Row].Row, "Plant");
+			if (!string.IsNullOrWhiteSpace(plant))
+				return plant.Trim();
 		}
-		else
+
+		return string.Empty;
+	}
+
+	private static bool IsMoqPlant(string plantId)
+	{
+		return string.Equals((plantId ?? string.Empty).Trim(), MoqPlantId, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static bool IsMoqExcludedPlant(string plantId)
+	{
+		return string.Equals((plantId ?? string.Empty).Trim(), MoqExcludedPlantId, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private bool ShouldApplyMoqForRow(DataRow row)
+	{
+		if (row == null || row.RowState == DataRowState.Deleted)
+			return false;
+
+		string sessionPlant = ((Ice.Core.Session)oTrans.Session).PlantID ?? string.Empty;
+		if (IsMoqExcludedPlant(sessionPlant))
+			return false;
+
+		string linePlant = GetOrderDtlRowString(row, "Plant");
+		if (IsMoqExcludedPlant(linePlant))
+			return false;
+		if (IsMoqPlant(linePlant))
+			return true;
+
+		string orderPlant = ResolveOrderPlant();
+		if (IsMoqExcludedPlant(orderPlant))
+			return false;
+
+		return IsMoqPlant(sessionPlant) || IsMoqPlant(orderPlant);
+	}
+
+	private bool ShouldApplyMoqValidation()
+	{
+		if (edvOrderDtl == null || edvOrderDtl.Row < 0 || edvOrderDtl.dataView == null)
+			return false;
+
+		return ShouldApplyMoqForRow(edvOrderDtl.dataView[edvOrderDtl.Row].Row);
+	}
+
+	private decimal ResolveSalesOrderQuantityForMoq(DataRow row)
+	{
+		if (row != null)
 		{
-			// PENDIENTE: VALIDARCANTIDADVENTA2();
+			decimal qty;
+			string selling = GetOrderDtlRowString(row, "SellingQuantity");
+			if (TryParseDecimalFlexible(selling, out qty) && qty != 0m)
+				return qty;
+
+			string orderQty = GetOrderDtlRowString(row, "OrderQty");
+			if (TryParseDecimalFlexible(orderQty, out qty) && qty != 0m)
+				return qty;
 		}
+
+		if (ventacantidad != null && !string.IsNullOrWhiteSpace(ventacantidad.Text))
+		{
+			decimal fromControl;
+			if (TryParseDecimalFlexible(ventacantidad.Text, out fromControl))
+				return fromControl;
+		}
+
+		return 0m;
+	}
+
+	private bool TryGetMoqFromBaQ(string partNum, out decimal moq, out string moqDisplay)
+	{
+		moq = 0m;
+		moqDisplay = string.Empty;
+		if (string.IsNullOrWhiteSpace(partNum))
+			return false;
+
+		using (DynamicQueryAdapter adapterDynamicQuery = new DynamicQueryAdapter(this.oTrans))
+		{
+			adapterDynamicQuery.BOConnect();
+			Ice.BO.QueryExecutionDataSet ds = new Ice.BO.QueryExecutionDataSet();
+			ds.ExecutionParameter.AddExecutionParameterRow("PARTE", partNum.Trim(), "nvarchar", false, Guid.Empty, "A");
+			adapterDynamicQuery.ExecuteByID(MoqBaqName, ds);
+
+			System.Data.DataTable results = adapterDynamicQuery.QueryResults.Tables["Results"];
+			if (results == null || results.Rows.Count == 0)
+				return false;
+
+			object cell0 = results.Rows[0][0];
+			moqDisplay = (cell0 == null) ? string.Empty : cell0.ToString();
+			return TryParseDecimalFlexible(moqDisplay, out moq);
+		}
+	}
+
+	private void ValidateMoqOnSave()
+	{
+		if (edvOrderDtl == null || edvOrderDtl.dataView == null)
+			return;
+
+		System.Text.StringBuilder blocked = new System.Text.StringBuilder();
+		System.Data.DataView detailView = edvOrderDtl.dataView;
+
+		for (int rowIndex = 0; rowIndex < detailView.Count; rowIndex++)
+		{
+			System.Data.DataRow row = detailView[rowIndex].Row;
+			if (row.RowState == DataRowState.Deleted)
+				continue;
+
+			if (!ShouldApplyMoqForRow(row))
+				continue;
+
+			string partNum = GetOrderDtlRowString(row, "PartNum");
+			if (string.IsNullOrWhiteSpace(partNum))
+				continue;
+
+			decimal moq;
+			string moqDisplay;
+			string orderLine = GetOrderDtlRowString(row, "OrderLine");
+			if (string.IsNullOrWhiteSpace(orderLine))
+				orderLine = Convert.ToString(rowIndex + 1);
+
+			if (!TryGetMoqFromBaQ(partNum, out moq, out moqDisplay))
+			{
+				blocked.AppendLine(string.Format(
+					"Línea {0}: Parte {1} — no se encontró MOQ en el BAQ.",
+					orderLine,
+					partNum));
+				continue;
+			}
+
+			decimal qty = ResolveSalesOrderQuantityForMoq(row);
+			if (qty <= 0m || moq <= qty)
+				continue;
+
+			blocked.AppendLine(string.Format(
+				"Línea {0}: Parte {1}, cantidad {2} — MOQ mínimo {3}.",
+				orderLine,
+				partNum,
+				qty.ToString("0.###"),
+				moqDisplay));
+		}
+
+		if (blocked.Length == 0)
+			return;
+
+		throw new UIException(
+			"Cantidad solicitada no cumple con el MOQ. Favor de notificar al cliente y/o ventas.\r\n\r\n"
+			+ blocked.ToString());
 	}
 
 	private void txtUPartNum_KeyUp(object sender, System.Windows.Forms.KeyEventArgs args)
@@ -826,6 +1450,9 @@ public class Script
 	//////////////////////////////////INICIA MÈTODO  CONSULTACANT VENTA 2////////////////////////////////////////////////////////
 	public void VALIDARCANTIDADVENTA2(string parte)
 	{
+		if (!ShouldApplyMoqValidation())
+			return;
+
 		EpiNumericEditor cantventa;
 		EpiNumericEditor orderqty;
 		EpiTextBox partess;
@@ -880,73 +1507,60 @@ public class Script
 
 	public void VALIDARCANTIDADVENTA(string parte)
 	{
-		EpiNumericEditor cantventa = (EpiNumericEditor)csm.GetNativeControlReference("618db547-897d-4311-871b-507a00ac0046");
-		EpiNumericEditor orderqty = (EpiNumericEditor)csm.GetNativeControlReference("fed8fcf1-c577-4d1f-9e27-b179b78eeb49");
-		EpiTextBox partess = (EpiTextBox)csm.GetNativeControlReference("e7bda90e-e89b-4693-854a-0ea3c9187e8e");
-
-		if (orderqty != null && string.IsNullOrWhiteSpace(orderqty.Text))
+		if (!ShouldApplyMoqValidation())
 			return;
 
-		const string baqName = "nummoc_c_ACTUALIZABLE";
+		EpiNumericEditor cantventa = (EpiNumericEditor)csm.GetNativeControlReference("618db547-897d-4311-871b-507a00ac0046");
+		EpiTextBox partess = (EpiTextBox)csm.GetNativeControlReference("e7bda90e-e89b-4693-854a-0ea3c9187e8e");
+		System.Data.DataRow currentRow = (edvOrderDtl != null && edvOrderDtl.Row >= 0 && edvOrderDtl.dataView != null)
+			? edvOrderDtl.dataView[edvOrderDtl.Row].Row
+			: null;
 
-		using (DynamicQueryAdapter adapterDynamicQuery = new DynamicQueryAdapter(this.oTrans))
+		decimal cantmocd;
+		string cantidadbaq;
+		if (!TryGetMoqFromBaQ(parte, out cantmocd, out cantidadbaq))
 		{
-			adapterDynamicQuery.BOConnect();
-
-			Ice.BO.QueryExecutionDataSet ds = new Ice.BO.QueryExecutionDataSet();
-			ds.ExecutionParameter.AddExecutionParameterRow("PARTE", parte, "nvarchar", false, Guid.Empty, "A");
-			adapterDynamicQuery.ExecuteByID(baqName, ds);
-
-			System.Data.DataTable results = adapterDynamicQuery.QueryResults.Tables["Results"];
-			if (results == null || results.Rows.Count == 0)
-			{
-				MessageBox.Show("No se encontró MOQ para esta parte. Revise la parte o el BAQ.");
+			MessageBox.Show("No se encontró MOQ para esta parte. Revise la parte o el BAQ.");
+			if (partess != null)
 				partess.Text = "INGRESE LA PARTE";
-				nummin.BackColor = Color.Red;
-				oTrans.Refresh();
-				return;
-			}
+			nummin.BackColor = Color.Red;
+			oTrans.Refresh();
+			return;
+		}
 
-			object cell0 = results.Rows[0][0];
-			string cantidadbaq = (cell0 == null) ? string.Empty : cell0.ToString();
+		decimal cntventd = ResolveSalesOrderQuantityForMoq(currentRow);
+		if (cntventd <= 0m)
+		{
+			nummin.Text = cantidadbaq;
+			nummin.BackColor = Color.Gold;
+			return;
+		}
 
-			decimal cantmocd;
-			if (!TryParseDecimalFlexible(cantidadbaq, out cantmocd))
-			{
-				MessageBox.Show("El MOQ devuelto por el BAQ no es un número válido.");
-				return;
-			}
-
-			decimal cntventd;
-			if (!TryParseDecimalFlexible(orderqty.Text, out cntventd))
-			{
-				MessageBox.Show("La cantidad de venta no es un número válido.");
-				return;
-			}
-
-			if (cntventd < 0)
-			{
-				MessageBox.Show("La cantidad no puede ser negativa.");
+		if (cntventd < 0m)
+		{
+			MessageBox.Show("La cantidad no puede ser negativa.");
+			if (partess != null)
 				partess.Text = "INGRESE LA PARTE";
-				nummin.BackColor = Color.Red;
-				oTrans.Refresh();
-				return;
-			}
+			nummin.BackColor = Color.Red;
+			oTrans.Refresh();
+			return;
+		}
 
-			if (cantmocd <= cntventd)
-			{
-				nummin.BackColor = Color.Green;
-				nummin.Text = cantidadbaq;
-			}
-			else
-			{
+		if (cantmocd <= cntventd)
+		{
+			nummin.BackColor = Color.Green;
+			nummin.Text = cantidadbaq;
+		}
+		else
+		{
+			if (cantventa != null)
 				cantventa.Text = "0.00";
-				MessageBox.Show("Cantidad solicitada no cumple con el MOQ. Favor de notificar al cliente y/o ventas.");
+			MessageBox.Show("Cantidad solicitada no cumple con el MOQ. Favor de notificar al cliente y/o ventas.");
+			if (partess != null)
 				partess.Text = "INGRESE LA PARTE";
-				nummin.Text = cantidadbaq;
-				nummin.BackColor = Color.Red;
-				oTrans.Refresh();
-			}
+			nummin.Text = cantidadbaq;
+			nummin.BackColor = Color.Red;
+			oTrans.Refresh();
 		}
 	}
 
@@ -1158,6 +1772,7 @@ public class Script
 					consultapartearance(view, Part);
 					estatus(view, Part);
 					consultacantidadUE(Part);
+					try { VALIDARCANTIDADVENTA(Part); } catch { }
 
 					DynamicQueryAdapter adapterDynamicQuery = new DynamicQueryAdapter(this.oTrans);
 					adapterDynamicQuery.BOConnect();
@@ -1500,6 +2115,10 @@ public class Script
 
 	private void baseToolbarsManager_ToolClick(object sender, Infragistics.Win.UltraWinToolbars.ToolClickEventArgs args)
 	{
+		LockCurrencyToolbarTools();
+		ApplyOrderCurrencyFromCustomer();
+		LockDetailCurrencyControls();
+
 		switch (args.Tool.Key)
 		{
 			case "DeleteTool":
@@ -1538,6 +2157,12 @@ public class Script
 	{
 		consultaparte();
 		ValidateNacionalShipToForCurrentLine();
+		if (edvOrderDtl != null && edvOrderDtl.Row >= 0)
+		{
+			string part = edvOrderDtl.dataView[edvOrderDtl.Row]["PartNum"].ToString();
+			if (!string.IsNullOrWhiteSpace(part))
+				try { VALIDARCANTIDADVENTA(part); } catch { }
+		}
 	}
 
 	public void coonsultavlidacion(string PARTE)
@@ -1653,6 +2278,15 @@ public class Script
 	private void ValidateImmexNacionalMaterialRules()
 	{
 		if (IsCodiflexIncExcludedCustomer())
+			return;
+
+		if (IsCopelandExcludedShipTo())
+			return;
+
+		if (IsRegalExcludedShipTo())
+			return;
+
+		if (IsThermoDiscExcludedShipTo())
 			return;
 
 		string currentPlant = ((Ice.Core.Session)oTrans.Session).PlantID;
@@ -1787,7 +2421,9 @@ public class Script
 		{
 			case "Update":
 
+				ValidateOrderCurrencyOnSave();
 				ValidateNacionalProdCodesOnSave();
+				ValidateMoqOnSave();
 
 				string Hed = edvOrderHed.dataView[edvOrderHed.Row]["PONum"].ToString();
 
@@ -1805,5 +2441,18 @@ public class Script
 		EpiTextBox partdescription = (EpiTextBox)csm.GetNativeControlReference("cb95b987-6975-4d4b-bb57-d42d8eaf7a0a");
 		partdescription.Enabled = false;
 		consultaConsolidadoOVEMB();
+		EnforceOrderCurrencyLock();
+		if (SalesOrderForm != null && !SalesOrderForm.IsDisposed)
+		{
+			SalesOrderForm.BeginInvoke((MethodInvoker)delegate
+			{
+				EnforceOrderCurrencyLock();
+			});
+			SalesOrderForm.BeginInvoke((MethodInvoker)delegate
+			{
+				_psCurrControl = null;
+				LockDetailCurrencyControls();
+			});
+		}
 	}
 }

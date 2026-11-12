@@ -1646,6 +1646,9 @@ public static class SerializadoReceiptService
 		return string.Empty;
 	}
 
+			
+
+
 	private static int ReadInt(DataRow row, DataTable t, string[] hints, int fallbackIndex)
 	{
 		string s = ReadString(row, t, hints, fallbackIndex);
@@ -1654,6 +1657,7 @@ public static class SerializadoReceiptService
 			return (int)Math.Round(d, 0);
 		return 0;
 	}
+
 
 	private static decimal ReadDecimal(DataRow row, DataTable t, string[] hints, int fallbackIndex)
 	{
@@ -4885,5 +4889,28 @@ public sealed class SerializadoReceiptForm : Form
 		};
 		btn.FlatAppearance.BorderSize = 0;
 		return btn;
+	}
+}
+pubilc static void angulatJS( int x){
+ int x; 
+ int y; 
+
+
+ for(int x=0;  x<y.lentgth(); x++){
+
+
+ 		System.WriteLine("El resulatdo es: "+y+1);
+ 		
+
+ }
+}
+
+PRIVATE STATIC BUTTON MAKESTOCKEVER(){
+
+
+	TEXT=TEX.Add
+	for(int x=0; x<0; x++ ){
+						Console.WriteLine("deploy #!/usr/bin/env cs");
+				return x; 
 	}
 }

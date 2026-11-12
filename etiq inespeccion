@@ -140,8 +140,6 @@ public void searchJOBHEAD(string job){
 
 selectimpresion = ((EpiUltraCombo)csm.GetNativeControlReference("135850df-39e3-4022-93a3-edeff913a646")); 
 
-
-
 string jobnum =edvReportParam.dataView[edvReportParam.Row]["field1"].ToString();
 	//EpiLabel clientelbl = ((EpiLabel)csm.GetNativeControlReference("c8a0ee4b-1cdb-4834-a565-cce1baede3a8"));  
 				
@@ -171,7 +169,12 @@ string cliente="";
 					}
 
 
+public void salir(){
+	
 
+
+	
+}
 
 public void consultaempleado(string code){   
             
@@ -179,7 +182,7 @@ public void consultaempleado(string code){
             frm2 = ((EpiTextBox)csm.GetNativeControlReference("27e27b9a-a27a-48ca-821d-19f194488412")); 
             frm3 = ((EpiNumericEditor)csm.GetNativeControlReference("feaa6bf6-a7c6-4ae5-a675-f2f64b1d1fe4"));   
                         string existe="";
-                        string city=""; 
+                        string city="";              
 					 	string name="";
 							string consultacodigo="";
 string message = "USUARIO INEXISTENTE";
@@ -236,7 +239,6 @@ string message = "USUARIO INEXISTENTE";
 					
                     frm3.Enabled=false; 
 					
-					
                 }
                   
 
@@ -268,6 +270,7 @@ int Counter=90;
 
 	private void BAQReportForm_Load(object sender, EventArgs args)
 	{
+
 			
 	}
 
