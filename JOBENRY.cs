@@ -3,7 +3,7 @@
 // MOQ epguid: 96cf1f82-e55d-42ee-b41a-caf25e263ac1 (MOQTEXT)
 // Botón Serializado epguid: 7e3c0614-510b-4a31-983b-eb5c2ea2ef96
 // Botón Otros epguid: 2f2a467a-e961-4c65-b4a8-25951d78fb02
-// BAQ reutilizados: BAQPO, CODIFLEX-UD10, FT_BAQ, BAQCONSULTAVALIDACIONMUESTRA
+// BAQ reutilizados: BAQPO, CODIFLEX-UD10, FT_BAQ, BAQCONSULTAVALIDACIONMUESTRA, ALERTASCALIDAD
 // v2: carga diferida JobHead + caché BAQ por sesión (abre Job Entry más rápido)
 // v2.1: orden_compra_c se llena al cambiar OrdenDeVenta_c + refresh UI (epguid b7fbb965...)
 // v2.2: FT corrida (epguid 637e5ce4...) — recarga en InitLastView/GetByID/JobNum y evita BAQ sin JobNum
@@ -58,6 +58,20 @@
 // v3.37: PRIORIDAD — dataView en AddRow, ForceRefreshList, oTrans.Refresh, tras Part/adapter
 // v3.38: FT visible todos los usuarios — TryApply verifica UI real; control cache + búsqueda; repintado 300/800ms
 // v3.39: PRIORIDAD — quita oTrans.Refresh (borraba NORMAL); Timer 300/700ms; AddRow dataView; sync consulta job
+// v3.40: ALERTASCALIDAD — Alerta Calidad + Fecha Vencimiento (BAQ) al consultar job; solo visible si hay datos
+// v3.40.1: alertacalidadentry epguid 3ce371a9... | fechavencimiento epguid 34adf578...
+// v3.40.2: Prefijos en UI — "ALERTA DE CALIDAD: " + valor | "FECHA VENCIMIENTO: " + fecha
+// v3.40.3: Solo controles Epicor (epguid); sin panel auto; siempre visibles en alertacalidadentry/fechavencimiento
+// v3.40.4: Igual Job Tracker — valida Parte BAQ; oculta si venció/sin datos; recarga al consultar job
+// v3.40.5: Fix generación timer (Init+InitLastView); BAQ multi-parámetro; reaplica tras hide fields
+// v3.40.6: Alerta inmediata al aparecer PartNum — caché instantánea + BAQ sin defer 650ms
+// v3.40.7: Job nuevo más rápido — debounce BAQs al crear; 1 param ALERTASCALIDAD; sin tormenta ColumnChanged
+// v3.40.8: Alerta calidad — carga diferida al consultar job (patrón Job Tracker); limpia al Clear/job vacío; re-aplica tras hide fields
+// v3.40.9: Alerta inmediata — caché al instante + BAQ sin delay; repinta tras Update/rebind; no cancela refresh entre eventos
+// v3.40.10: Actualiza al cambiar Part (UD alerta/vigencia), Refresh, volver al form; BAQ fresco sin caché vieja
+// v3.40.10.1: Fix compile — quita NotifyType.FieldChange (no existe en Epicor); usa Part ColumnChanged
+// v3.40.11: Solo Alerta Calidad en UI; vigencia del BAQ solo para ocultar si ya venció
+// v3.40.12: Alerta calidad 1 sola consulta BAQ — debounce 200ms; sin tormenta al cambiar parte/Get Details
 // **************************************************
 
 extern alias Erp_Contracts_BO_JobEntry;
@@ -135,6 +149,10 @@ public class Script
     private const string PrioridadControlEpGuid = "98cbb708-0d16-488f-b1da-04c4dbaa3538";
     private const string PrioridadFieldName = "prioridades_c";
     private const string PrioridadDefaultValue = "NORMAL";
+    private const string AlertaCalidadBaqName = "ALERTASCALIDAD";
+    private const string AlertaCalidadControlEpGuid = "3ce371a9-c430-4ba1-91be-3b0f45076295";
+    private const string AlertaCalidadControlName = "alertacalidadentry";
+    private const string AlertaCalidadDisplayPrefix = "ALERTA DE CALIDAD: ";
     private Control _btnSerializado;
     private Control _btnOtros;
     private Control _validacionParteControl;
@@ -151,6 +169,9 @@ public class Script
     private string _moqTrackedJobNum;
 
     private EpiDataView edvJobProd;
+    private EpiDataView edvPart;
+    private bool _partColumnChangedWired;
+    private bool _jobEntryFormActivatedWired;
 
     private string _pendingDeferredJobKey;
     private int _pendingDeferredRow = -1;
@@ -176,6 +197,23 @@ public class Script
     private bool _hiddenFieldsLayoutApplied;
     private string _lastValidacionUiText = string.Empty;
     private Color _lastValidacionUiBackColor = Color.Empty;
+    private Control _alertaCalidadControl;
+    private Control[] _alertaCalidadLabelControls;
+    private bool _alertaCalidadLabelsResolved;
+    private string _pendingAlertaCalidadPart = string.Empty;
+    private string _lastAlertaCalidadAppliedPart = string.Empty;
+    private string _lastAlertaCalidadResultPart = string.Empty;
+    private AlertaCalidadBaQResult _lastAlertaCalidadResult;
+    private int _alertaCalidadCancelGeneration;
+    private string _alertaCalidadResolvedParamName = string.Empty;
+    private Timer _newJobPartLoadTimer;
+    private string _newJobPartLoadPending = string.Empty;
+    private const int NewJobPartLoadDebounceMs = 280;
+    private Timer _alertaCalidadLoadTimer;
+    private string _alertaCalidadLoadPending = string.Empty;
+    private bool _alertaCalidadLoadForceReload;
+    private string _lastAlertaCalidadBaqPart = string.Empty;
+    private const int AlertaCalidadLoadDebounceMs = 200;
 
     private const int MaxFtConsultAttempts = 5;
     private const int MaxDeferredFtAttempts = 4;
@@ -184,6 +222,10 @@ public class Script
     private const int MaxFtFieldApplyAttempts = 8;
     private const int MaxQuantityWireAttempts = 10;
     private const int MaxPrioridadApplyAttempts = 12;
+    private const int MaxAlertaCalidadRefreshAttempts = 4;
+private const string AtrasoCheckEpGuid = "8a052447-0d84-4845-aad1-a329332f4cbe";
+private const string MotivoAtrasoEpGuid = "5c6056c7-faba-45d0-aa61-a0bfac8b9e5e";
+private string _atrasoJobNum = null;
 
     /// <summary>True mientras el diseñador de Form Customization está abierto.</summary>
     private bool IsJobEntryCustomizationMode()
@@ -290,8 +332,24 @@ public class Script
         {
             if (oTrans.EpiDataViews.ContainsKey("Part"))
             {
-                EpiDataView edvPart = (EpiDataView)oTrans.EpiDataViews["Part"];
+                edvPart = (EpiDataView)oTrans.EpiDataViews["Part"];
                 edvPart.EpiViewNotification += new EpiViewNotification(edvPart_EpiViewNotification);
+                WirePartColumnChanged();
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            if (!ShouldRunRuntimeUiLogic() || _jobEntryFormActivatedWired || JobEntryForm == null)
+            {
+            }
+            else
+            {
+                JobEntryForm.Activated += JobEntryForm_Activated;
+                _jobEntryFormActivatedWired = true;
             }
         }
         catch
@@ -331,6 +389,16 @@ public class Script
         WireOrdenVentaLeave();
         WireQuantityLeaveEvents();
         ScheduleWireQuantityLeave(0);
+    }
+
+    private static bool IsAlertaCalidadFieldControl(Control control)
+    {
+        if (control == null)
+            return false;
+        string n = NormalizeSearchText(control.Name);
+        if (n == "alertacalidadentry")
+            return true;
+        return n.IndexOf("alertacalidad", StringComparison.Ordinal) >= 0;
     }
 
     private static Control FindControlByName(Control parent, string name)
@@ -450,6 +518,18 @@ public class Script
             return true;
         if (n.IndexOf("prioridad", StringComparison.Ordinal) >= 0)
             return true;
+        if (n.IndexOf("cfxalertacalidad", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("alertacalidad", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n == "alertacalidadentry")
+            return true;
+        if (n.IndexOf("vigenciacalidad", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n == "fechavencimiento")
+            return true;
+        if (n.IndexOf("fechavencimientocalidad", StringComparison.Ordinal) >= 0)
+            return true;
 
         return false;
     }
@@ -457,6 +537,8 @@ public class Script
     private static bool IsProtectedCustomDateControl(Control control)
     {
         if (control == null)
+            return false;
+        if (IsAlertaCalidadFieldControl(control))
             return false;
         if (IsProtectedClienteControl(control))
             return true;
@@ -530,6 +612,12 @@ public class Script
     {
         string n = NormalizeSearchText(controlName);
         if (n.Length == 0)
+            return false;
+        if (n == "alertacalidadentry" || n == "fechavencimiento")
+            return false;
+        if (n.IndexOf("alertacalidad", StringComparison.Ordinal) >= 0)
+            return false;
+        if (n.IndexOf("fechavencimiento", StringComparison.Ordinal) >= 0)
             return false;
         if (n.IndexOf("desvcomentario", StringComparison.Ordinal) >= 0)
             return false;
@@ -794,6 +882,7 @@ public class Script
                 try
                 {
                     ApplyHiddenJobEntryFields();
+                    ReapplyAlertaCalidadUiIfPending();
                     if (edvJobHead != null && edvJobHead.Row >= 0)
                     {
                         string jobNum = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
@@ -2282,6 +2371,7 @@ public class Script
                 {
                     ResetFtCorridaForNewJob();
                     ScheduleApplyPrioridadDefaultForNewJob(0);
+                    ClearAlertaCalidadUi();
                 }
                 else
                     LoadFtCorridaOnJobConsult(proposedJob);
@@ -2297,14 +2387,21 @@ public class Script
                 {
                     ApplyValidacionParteUi(string.Empty);
                     SetFtCorridaField(string.Empty);
+                    ClearAlertaCalidadUi();
+                    return;
+                }
+
+                if (IsNewJobContext())
+                {
+                    ScheduleApplyPrioridadDefaultForNewJob(0);
+                    ScheduleDebouncedNewJobPartLoad(part);
                     return;
                 }
 
                 JobEntryBaqCache.InvalidateValidacionParte(part);
                 JobEntryBaqCache.InvalidateFtPerMill(part);
                 ScheduleRefreshValidacionParte(part, 0);
-                if (IsNewJobContext())
-                    ScheduleApplyPrioridadDefaultForNewJob(0);
+                ScheduleAlertaCalidadLoad(part, true);
                 return;
             }
 
@@ -2541,15 +2638,22 @@ public class Script
         if (string.IsNullOrWhiteSpace(part))
         {
             ApplyValidacionParteUi(string.Empty);
+            ClearAlertaCalidadUi();
             return;
         }
 
         part = part.Trim();
-        JobEntryBaqCache.InvalidateValidacionParte(part);
-        ScheduleRefreshValidacionParte(part, 0);
 
         if (IsNewJobContext())
+        {
+            FlushDebouncedNewJobPartLoad(part, true);
             ScheduleApplyPrioridadDefaultForNewJob(0);
+            return;
+        }
+
+        JobEntryBaqCache.InvalidateValidacionParte(part);
+        ScheduleRefreshValidacionParte(part, 0);
+        ScheduleAlertaCalidadLoad(part, true);
 
         string currentPlant = ((Ice.Core.Session)oTrans.Session).PlantID;
         if (currentPlant == MoqPlantId)
@@ -2588,6 +2692,8 @@ public class Script
         catch { }
         return false;
     }
+
+
 
     private void ClearMoqViolationState() { _moqViolationHandledSig = null; }
 
@@ -3324,11 +3430,39 @@ public class Script
             edvJobProd.EpiViewNotification -= new EpiViewNotification(edvJobProd_EpiViewNotification);
             edvJobProd = null;
         }
+        if (edvPart != null)
+        {
+            try
+            {
+                if (edvPart.dataView != null && edvPart.dataView.Table != null)
+                    edvPart.dataView.Table.ColumnChanged -= Part_Table_ColumnChanged;
+            }
+            catch { }
+            edvPart.EpiViewNotification -= new EpiViewNotification(edvPart_EpiViewNotification);
+            edvPart = null;
+        }
+        if (_jobEntryFormActivatedWired && JobEntryForm != null)
+        {
+            try { JobEntryForm.Activated -= JobEntryForm_Activated; } catch { }
+            _jobEntryFormActivatedWired = false;
+        }
         if (_ftQtyRefreshTimer != null)
         {
             _ftQtyRefreshTimer.Stop();
             _ftQtyRefreshTimer.Dispose();
             _ftQtyRefreshTimer = null;
+        }
+        if (_newJobPartLoadTimer != null)
+        {
+            _newJobPartLoadTimer.Stop();
+            _newJobPartLoadTimer.Dispose();
+            _newJobPartLoadTimer = null;
+        }
+        if (_alertaCalidadLoadTimer != null)
+        {
+            _alertaCalidadLoadTimer.Stop();
+            _alertaCalidadLoadTimer.Dispose();
+            _alertaCalidadLoadTimer = null;
         }
         if (_btnSerializado != null)
         {
@@ -3364,6 +3498,9 @@ public class Script
                     string refreshJob = SafeDataViewString(edvJobHead, edvJobHead.Row, "JobNum");
                     if (!string.IsNullOrWhiteSpace(refreshJob))
                         LoadFtCorridaOnJobConsult(refreshJob.Trim());
+                    string refreshPart = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+                    if (!string.IsNullOrWhiteSpace(refreshPart) && !IsNewJobContext())
+                        FlushAlertaCalidadLoad(refreshPart.Trim(), true);
                 }
                 break;
             case "ClearTool":
@@ -3375,7 +3512,10 @@ public class Script
                 _prioridadControl = null;
                 _cmbPrioridad = null;
                 ScheduleApplyPrioridadDefaultForNewJob(0);
+                ClearAlertaCalidadUi();
                 ScheduleApplyHiddenJobEntryFields(0);
+                _atrasoJobNum = string.Empty;
+                LimpiarAtraso();
                 break;
         }
     }
@@ -3605,6 +3745,925 @@ public class Script
         return text;
     }
 
+    private Control ResolveAlertaCalidadControl()
+    {
+        try
+        {
+            if (_alertaCalidadControl != null && !_alertaCalidadControl.IsDisposed
+                && IsAlertaCalidadFieldControl(_alertaCalidadControl))
+                return _alertaCalidadControl;
+
+            _alertaCalidadControl = null;
+            if (!string.IsNullOrWhiteSpace(AlertaCalidadControlEpGuid))
+            {
+                Control byGuid = csm.GetNativeControlReference(AlertaCalidadControlEpGuid) as Control;
+                if (byGuid != null && !byGuid.IsDisposed)
+                {
+                    _alertaCalidadControl = byGuid;
+                    return _alertaCalidadControl;
+                }
+            }
+
+            string[] names = new string[]
+            {
+                AlertaCalidadControlName, "alertacalidadentry"
+            };
+            for (int i = 0; i < names.Length && _alertaCalidadControl == null; i++)
+                _alertaCalidadControl = FindControlByName(JobEntryForm, names[i]);
+        }
+        catch
+        {
+        }
+        return _alertaCalidadControl;
+    }
+
+    private static bool TryParseAlertaCalidadVigenciaDate(string vigenciaText, out DateTime vigenciaDate)
+    {
+        vigenciaDate = DateTime.MinValue;
+        if (string.IsNullOrWhiteSpace(vigenciaText))
+            return false;
+
+        vigenciaText = vigenciaText.Trim();
+        if (vigenciaText.StartsWith("FECHA VENCIMIENTO:", StringComparison.OrdinalIgnoreCase))
+            vigenciaText = vigenciaText.Substring("FECHA VENCIMIENTO:".Length).Trim();
+
+        if (DateTime.TryParseExact(vigenciaText, "dd/MM/yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out vigenciaDate))
+            return true;
+        if (DateTime.TryParseExact(vigenciaText, "d/M/yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out vigenciaDate))
+            return true;
+        if (DateTime.TryParse(vigenciaText, CultureInfo.CurrentCulture, DateTimeStyles.None, out vigenciaDate))
+            return true;
+        return DateTime.TryParse(vigenciaText, CultureInfo.InvariantCulture, DateTimeStyles.None, out vigenciaDate);
+    }
+
+    private static bool IsAlertaCalidadVigenciaExpired(DateTime? vigenciaDate, string vigenciaText)
+    {
+        DateTime dt;
+        if (vigenciaDate.HasValue)
+            dt = vigenciaDate.Value.Date;
+        else if (!TryParseAlertaCalidadVigenciaDate(vigenciaText, out dt))
+            return false;
+
+        return dt.Date < DateTime.Today;
+    }
+
+    private void EnsureAlertaCalidadLabelsCached()
+    {
+        if (_alertaCalidadLabelsResolved || JobEntryForm == null || JobEntryForm.IsDisposed)
+            return;
+
+        _alertaCalidadLabelsResolved = true;
+        List<Control> found = new List<Control>();
+        string[] labelHints = new string[]
+        {
+            "alerta calidad", "alerta de calidad"
+        };
+        CollectAlertaCalidadLabels(JobEntryForm, labelHints, found);
+        _alertaCalidadLabelControls = found.ToArray();
+    }
+
+    private static void CollectAlertaCalidadLabels(Control parent, string[] labelHints, List<Control> found)
+    {
+        if (parent == null)
+            return;
+
+        Label lbl = parent as Label;
+        if (lbl != null)
+        {
+            string t = lbl.Text == null ? string.Empty : lbl.Text.Trim();
+            for (int h = 0; h < labelHints.Length; h++)
+            {
+                if (t.IndexOf(labelHints[h], StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    found.Add(lbl);
+                    break;
+                }
+            }
+        }
+
+        foreach (Control child in parent.Controls)
+            CollectAlertaCalidadLabels(child, labelHints, found);
+    }
+
+    private void SetAlertaCalidadBlockVisible(bool visible)
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        try
+        {
+            Control alertCtrl = ResolveAlertaCalidadControl();
+            if (alertCtrl != null && !alertCtrl.IsDisposed)
+            {
+                alertCtrl.Visible = visible;
+                if (visible && !alertCtrl.Enabled)
+                    alertCtrl.Enabled = true;
+                if (visible && alertCtrl.Height <= 1)
+                    alertCtrl.Height = 22;
+            }
+
+            EnsureAlertaCalidadLabelsCached();
+            if (_alertaCalidadLabelControls == null)
+                return;
+
+            for (int i = 0; i < _alertaCalidadLabelControls.Length; i++)
+            {
+                Control lbl = _alertaCalidadLabelControls[i];
+                if (lbl == null || lbl.IsDisposed)
+                    continue;
+                lbl.Visible = visible;
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void HideAlertaCalidadUi()
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        try
+        {
+            ApplyReadOnlyDisplayControl(ResolveAlertaCalidadControl(), string.Empty);
+            SetAlertaCalidadBlockVisible(false);
+        }
+        catch
+        {
+        }
+    }
+
+    private static void ApplyReadOnlyDisplayControl(Control ctrl, string text)
+    {
+        if (ctrl == null)
+            return;
+
+        text = text == null ? string.Empty : text.Trim();
+        if (!ctrl.Visible)
+            ctrl.Visible = true;
+
+        EpiTextBox tb = ctrl as EpiTextBox;
+        if (tb != null)
+        {
+            tb.ReadOnly = true;
+            tb.Text = text;
+            tb.Refresh();
+            return;
+        }
+
+        ctrl.Text = text;
+        ctrl.Refresh();
+    }
+
+    private void ClearAlertaCalidadUi()
+    {
+        _alertaCalidadCancelGeneration++;
+        _pendingAlertaCalidadPart = string.Empty;
+        _lastAlertaCalidadAppliedPart = string.Empty;
+        _lastAlertaCalidadResultPart = string.Empty;
+        _lastAlertaCalidadResult = null;
+        _lastAlertaCalidadBaqPart = string.Empty;
+        _alertaCalidadLoadPending = string.Empty;
+        _alertaCalidadLoadForceReload = false;
+        try { if (_alertaCalidadLoadTimer != null) _alertaCalidadLoadTimer.Stop(); } catch { }
+        HideAlertaCalidadUi();
+    }
+
+    private void TryApplyAlertaCalidadInstant(string part)
+    {
+        if (string.IsNullOrWhiteSpace(part) || !IsCurrentJobHeadPart(part))
+            return;
+
+        part = part.Trim();
+        try
+        {
+            AlertaCalidadBaQResult cached;
+            if (JobEntryBaqCache.TryGetAlertaCalidad(part, out cached)
+                && cached != null && cached.HasData && !cached.IsExpired)
+            {
+                ApplyAlertaCalidadUi(cached, part);
+                return;
+            }
+
+            if (string.Equals(_lastAlertaCalidadResultPart, part, StringComparison.OrdinalIgnoreCase)
+                && _lastAlertaCalidadResult != null && _lastAlertaCalidadResult.HasData
+                && !_lastAlertaCalidadResult.IsExpired)
+                ApplyAlertaCalidadUi(_lastAlertaCalidadResult, part);
+        }
+        catch
+        {
+        }
+    }
+
+    private void ReapplyAlertaCalidadUiIfPending()
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        string part = _lastAlertaCalidadAppliedPart;
+        if (string.IsNullOrWhiteSpace(part))
+            part = _pendingAlertaCalidadPart;
+        if (string.IsNullOrWhiteSpace(part) || !IsCurrentJobHeadPart(part))
+            return;
+
+        TryApplyAlertaCalidadInstant(part);
+    }
+
+    private void RememberAlertaCalidadResult(string part, AlertaCalidadBaQResult data)
+    {
+        if (string.IsNullOrWhiteSpace(part) || data == null || !data.HasData)
+            return;
+
+        _lastAlertaCalidadResultPart = part.Trim();
+        _lastAlertaCalidadResult = data;
+    }
+
+    private static string FormatAlertaCalidadDisplay(string alerta)
+    {
+        alerta = alerta == null ? string.Empty : alerta.Trim();
+        if (alerta.Length == 0)
+            return string.Empty;
+        if (alerta.StartsWith(AlertaCalidadDisplayPrefix, StringComparison.OrdinalIgnoreCase))
+            return alerta;
+        return AlertaCalidadDisplayPrefix + alerta;
+    }
+
+    private bool IsCurrentJobHeadPart(string partNum)
+    {
+        if (string.IsNullOrWhiteSpace(partNum) || edvJobHead == null || edvJobHead.Row < 0)
+            return false;
+
+        string currentPart = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+        return string.Equals(currentPart, partNum.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ApplyAlertaCalidadUi(AlertaCalidadBaQResult data, string expectedPartNum)
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        if (!IsCurrentJobHeadPart(expectedPartNum))
+            return;
+
+        if (data == null || !data.HasData
+            || data.IsExpired
+            || IsAlertaCalidadVigenciaExpired(data.VigenciaDate, data.Vigencia))
+        {
+            HideAlertaCalidadUi();
+            return;
+        }
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host != null && !host.IsDisposed && host.IsHandleCreated)
+            {
+                MethodInvoker paint = delegate { ApplyAlertaCalidadUiCore(data, expectedPartNum); };
+                if (host.InvokeRequired)
+                    host.BeginInvoke(paint);
+                else
+                    paint();
+                return;
+            }
+        }
+        catch
+        {
+        }
+
+        ApplyAlertaCalidadUiCore(data, expectedPartNum);
+    }
+
+    private void ApplyAlertaCalidadUiCore(AlertaCalidadBaQResult data, string expectedPartNum)
+    {
+        SetAlertaCalidadBlockVisible(true);
+        ApplyReadOnlyDisplayControl(ResolveAlertaCalidadControl(), FormatAlertaCalidadDisplay(data.Alerta));
+        _lastAlertaCalidadAppliedPart = expectedPartNum == null ? string.Empty : expectedPartNum.Trim();
+    }
+
+    private static string FormatAlertaCalidadDate(object value)
+    {
+        if (value == null || value == DBNull.Value)
+            return string.Empty;
+
+        if (value is DateTime)
+            return ((DateTime)value).ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+
+        string text = value.ToString().Trim();
+        if (text.Length == 0)
+            return string.Empty;
+
+        DateTime dt;
+        if (DateTime.TryParse(text, CultureInfo.CurrentCulture, DateTimeStyles.None, out dt)
+            || DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
+            return dt.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
+
+        return text;
+    }
+
+    private static string ReadAlertaCalidadColumn(DataRow row, DataTable table, string[] hints, int fallbackIndex)
+    {
+        if (row == null || table == null)
+            return string.Empty;
+
+        for (int h = 0; h < hints.Length; h++)
+        {
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                string colName = table.Columns[c].ColumnName ?? string.Empty;
+                if (colName.IndexOf(hints[h], StringComparison.OrdinalIgnoreCase) < 0
+                    && !colName.Equals(hints[h], StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                object cell = row[c];
+                if (cell == null || cell == DBNull.Value)
+                    continue;
+                string parsed = cell.ToString().Trim();
+                if (parsed.Length > 0)
+                    return parsed;
+            }
+        }
+
+        if (fallbackIndex >= 0 && fallbackIndex < table.Columns.Count)
+        {
+            object cell = row[fallbackIndex];
+            if (cell != null && cell != DBNull.Value)
+                return cell.ToString().Trim();
+        }
+        return string.Empty;
+    }
+
+    private static bool AlertaCalidadRowMatchesPart(DataRow row, DataTable table, string expectedPartNum)
+    {
+        if (row == null || table == null || string.IsNullOrWhiteSpace(expectedPartNum))
+            return true;
+
+        string parteRow = ReadAlertaCalidadColumn(row, table,
+            new string[] { "Parte", "PartNum", "PARTE", "partNum_" }, 0);
+        if (string.IsNullOrWhiteSpace(parteRow))
+            return true;
+
+        return string.Equals(parteRow.Trim(), expectedPartNum.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static AlertaCalidadBaQResult ParseAlertasCalidadResults(DataTable table, string expectedPartNum)
+    {
+        AlertaCalidadBaQResult result = new AlertaCalidadBaQResult();
+        if (table == null || table.Rows.Count == 0)
+            return result;
+
+        DataRow row = null;
+        for (int r = 0; r < table.Rows.Count; r++)
+        {
+            if (AlertaCalidadRowMatchesPart(table.Rows[r], table, expectedPartNum))
+            {
+                row = table.Rows[r];
+                break;
+            }
+        }
+        if (row == null)
+            return result;
+
+        string alerta = ReadAlertaCalidadColumn(row, table,
+            new string[] { "Alerta de calidad", "AlertaCalidad", "alerta_calidad", "Calculated_Alerta" }, 2);
+        string vigenciaRaw = ReadAlertaCalidadColumn(row, table,
+            new string[] { "vigencia_c", "Vigencia_c", "FechaVencimiento", "vigencia" }, 3);
+
+        if (string.IsNullOrWhiteSpace(alerta))
+        {
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                string colName = table.Columns[c].ColumnName ?? string.Empty;
+                if (colName.IndexOf("alerta", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                object cell = row[c];
+                if (cell == null || cell == DBNull.Value)
+                    continue;
+                string parsed = cell.ToString().Trim();
+                if (parsed.Length > 0)
+                {
+                    alerta = parsed;
+                    break;
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(vigenciaRaw))
+        {
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                string colName = table.Columns[c].ColumnName ?? string.Empty;
+                if (colName.IndexOf("vigencia", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                vigenciaRaw = FormatAlertaCalidadDate(row[c]);
+                if (vigenciaRaw.Length > 0)
+                    break;
+            }
+        }
+        else
+            vigenciaRaw = FormatAlertaCalidadDate(vigenciaRaw);
+
+        if (string.IsNullOrWhiteSpace(alerta))
+            return result;
+
+        DateTime vigenciaDate;
+        if (TryParseAlertaCalidadVigenciaDate(vigenciaRaw, out vigenciaDate))
+        {
+            result.VigenciaDate = vigenciaDate.Date;
+            result.IsExpired = vigenciaDate.Date < DateTime.Today;
+        }
+
+        result.Alerta = alerta;
+        result.Vigencia = vigenciaRaw;
+        result.HasData = true;
+        return result;
+    }
+
+    private static bool IsAlertaCalidadPartFieldColumn(string columnName)
+    {
+        string n = NormalizeSearchText(columnName);
+        if (n.Length == 0)
+            return false;
+        if (n.IndexOf("alerta", StringComparison.Ordinal) >= 0
+            && n.IndexOf("calidad", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("vigencia", StringComparison.Ordinal) >= 0)
+            return true;
+        if (n.IndexOf("fechavenc", StringComparison.Ordinal) >= 0)
+            return true;
+        return false;
+    }
+
+    private static string ReadPartDataViewColumn(EpiDataView partView, int row, string[] hints)
+    {
+        if (partView == null || row < 0 || partView.dataView == null || partView.dataView.Table == null)
+            return string.Empty;
+
+        DataTable table = partView.dataView.Table;
+        for (int h = 0; h < hints.Length; h++)
+        {
+            for (int c = 0; c < table.Columns.Count; c++)
+            {
+                string colName = table.Columns[c].ColumnName ?? string.Empty;
+                string colNorm = NormalizeSearchText(colName);
+                string hintNorm = NormalizeSearchText(hints[h]);
+                if (colNorm.IndexOf(hintNorm, StringComparison.Ordinal) < 0
+                    && !colNorm.Equals(hintNorm, StringComparison.Ordinal))
+                    continue;
+
+                object cell = partView.dataView[row][c];
+                if (cell == null || cell == DBNull.Value)
+                    continue;
+                string parsed = cell.ToString().Trim();
+                if (parsed.Length > 0)
+                    return parsed;
+            }
+        }
+        return string.Empty;
+    }
+
+    private bool TryGetAlertaCalidadFromPartDataView(string expectedPart, out AlertaCalidadBaQResult result)
+    {
+        result = new AlertaCalidadBaQResult();
+        try
+        {
+            if (edvPart == null || edvPart.Row < 0 || edvPart.dataView == null || edvPart.dataView.Table == null)
+                return false;
+
+            string loadedPart = SafeDataViewString(edvPart, edvPart.Row, "PartNum");
+            if (!string.IsNullOrWhiteSpace(expectedPart)
+                && !string.Equals(loadedPart, expectedPart.Trim(), StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string alerta = ReadPartDataViewColumn(edvPart, edvPart.Row, new string[]
+            {
+                "alerta_calidad", "alertacalidad", "alerta calidad", "alerta_de_calidad"
+            });
+            string vigenciaRaw = ReadPartDataViewColumn(edvPart, edvPart.Row, new string[]
+            {
+                "vigencia_c", "vigencia", "fecha_vencimiento", "fechavencimiento", "fecha vencimiento"
+            });
+            vigenciaRaw = FormatAlertaCalidadDate(vigenciaRaw);
+
+            if (string.IsNullOrWhiteSpace(alerta))
+                return false;
+
+            DateTime vigenciaDate;
+            if (TryParseAlertaCalidadVigenciaDate(vigenciaRaw, out vigenciaDate))
+            {
+                result.VigenciaDate = vigenciaDate.Date;
+                result.IsExpired = vigenciaDate.Date < DateTime.Today;
+            }
+
+            result.Alerta = alerta;
+            result.Vigencia = vigenciaRaw;
+            result.HasData = true;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void InvalidateAlertaCalidadSnapshot(string part)
+    {
+        if (string.IsNullOrWhiteSpace(part))
+            return;
+
+        part = part.Trim();
+        JobEntryBaqCache.InvalidateAlertaCalidad(part);
+        if (string.Equals(_lastAlertaCalidadResultPart, part, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastAlertaCalidadResultPart = string.Empty;
+            _lastAlertaCalidadResult = null;
+        }
+    }
+
+    private AlertaCalidadBaQResult LoadAlertasCalidadFromBaQ(string partNum, bool forceReload)
+    {
+        AlertaCalidadBaQResult empty = new AlertaCalidadBaQResult();
+        if (string.IsNullOrWhiteSpace(partNum))
+            return empty;
+
+        partNum = partNum.Trim();
+        if (!forceReload)
+        {
+            AlertaCalidadBaQResult fromPart;
+            if (TryGetAlertaCalidadFromPartDataView(partNum, out fromPart) && fromPart.HasData)
+            {
+                JobEntryBaqCache.SetAlertaCalidad(partNum, fromPart);
+                return fromPart;
+            }
+
+            AlertaCalidadBaQResult cached;
+            if (JobEntryBaqCache.TryGetAlertaCalidad(partNum, out cached))
+                return cached ?? empty;
+        }
+
+        string[] paramNames;
+        if (!string.IsNullOrWhiteSpace(_alertaCalidadResolvedParamName))
+            paramNames = new string[] { _alertaCalidadResolvedParamName };
+        else
+            paramNames = new string[] { "PARTE", "PartNum", "partNum_", "Parte" };
+
+        AlertaCalidadBaQResult parsed = empty;
+        for (int i = 0; i < paramNames.Length; i++)
+        {
+            try
+            {
+                using (DynamicQueryAdapter dq = new DynamicQueryAdapter(oTrans))
+                {
+                    dq.BOConnect();
+                    Ice.BO.QueryExecutionDataSet ds = new Ice.BO.QueryExecutionDataSet();
+                    ds.ExecutionParameter.AddExecutionParameterRow(paramNames[i], partNum, "nvarchar", false, Guid.Empty, "A");
+                    dq.ExecuteByID(AlertaCalidadBaqName, ds);
+                    DataTable table = dq.QueryResults.Tables["Results"];
+                    parsed = ParseAlertasCalidadResults(table, partNum);
+                    if (parsed.HasData)
+                    {
+                        _alertaCalidadResolvedParamName = paramNames[i];
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        JobEntryBaqCache.SetAlertaCalidad(partNum, parsed);
+        return parsed;
+    }
+
+    private void ScheduleAlertaCalidadLoad(string part, bool forceReload)
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        if (string.IsNullOrWhiteSpace(part))
+        {
+            ClearAlertaCalidadUi();
+            return;
+        }
+
+        part = part.Trim();
+        _alertaCalidadLoadPending = part;
+        if (forceReload)
+            _alertaCalidadLoadForceReload = true;
+
+        if (!forceReload
+            && string.Equals(_lastAlertaCalidadBaqPart, part, StringComparison.OrdinalIgnoreCase))
+        {
+            TryApplyAlertaCalidadInstant(part);
+            return;
+        }
+
+        TryApplyAlertaCalidadInstant(part);
+
+        try
+        {
+            if (_alertaCalidadLoadTimer == null)
+            {
+                _alertaCalidadLoadTimer = new Timer();
+                _alertaCalidadLoadTimer.Interval = AlertaCalidadLoadDebounceMs;
+                _alertaCalidadLoadTimer.Tick += AlertaCalidadLoadTimer_Tick;
+            }
+            _alertaCalidadLoadTimer.Stop();
+            _alertaCalidadLoadTimer.Start();
+        }
+        catch { }
+    }
+
+    private void AlertaCalidadLoadTimer_Tick(object sender, EventArgs e)
+    {
+        try { if (_alertaCalidadLoadTimer != null) _alertaCalidadLoadTimer.Stop(); } catch { }
+        string part = _alertaCalidadLoadPending;
+        bool force = _alertaCalidadLoadForceReload;
+        _alertaCalidadLoadPending = string.Empty;
+        _alertaCalidadLoadForceReload = false;
+        if (string.IsNullOrWhiteSpace(part))
+            return;
+        ExecuteAlertaCalidadLoadNow(part, force);
+    }
+
+    private void FlushAlertaCalidadLoad(string part, bool forceReload)
+    {
+        try { if (_alertaCalidadLoadTimer != null) _alertaCalidadLoadTimer.Stop(); } catch { }
+        _alertaCalidadLoadPending = string.Empty;
+        _alertaCalidadLoadForceReload = false;
+        ExecuteAlertaCalidadLoadNow(part, forceReload);
+    }
+
+    private void RequestAlertaCalidadForPart(string part, bool forceReload)
+    {
+        ScheduleAlertaCalidadLoad(part, forceReload);
+    }
+
+    private void RefreshAlertaCalidadForCurrentJob(EpiDataView view, int row)
+    {
+        ScheduleAlertaCalidadLoad(SafeDataViewString(view, row, "PartNum"), true);
+    }
+
+    private void LoadAlertaCalidadForPart(string part, bool forceReload)
+    {
+        ScheduleAlertaCalidadLoad(part, forceReload);
+    }
+
+    private void ExecuteAlertaCalidadLoadNow(string part, bool forceReload)
+    {
+        if (!ShouldRunRuntimeUiLogic())
+            return;
+
+        if (string.IsNullOrWhiteSpace(part))
+        {
+            ClearAlertaCalidadUi();
+            return;
+        }
+
+        part = part.Trim();
+        _pendingAlertaCalidadPart = part;
+
+        if (!forceReload
+            && string.Equals(_lastAlertaCalidadBaqPart, part, StringComparison.OrdinalIgnoreCase))
+        {
+            TryApplyAlertaCalidadInstant(part);
+            ScheduleAlertaCalidadRepaintWaves(part, _alertaCalidadCancelGeneration);
+            return;
+        }
+
+        if (forceReload)
+            InvalidateAlertaCalidadSnapshot(part);
+        else
+            TryApplyAlertaCalidadInstant(part);
+
+        int cancelGen = _alertaCalidadCancelGeneration;
+        ExecuteAlertaCalidadRefreshNow(part, forceReload, 0, cancelGen);
+        ScheduleAlertaCalidadRepaintWaves(part, cancelGen);
+    }
+
+    private void ExecuteAlertaCalidadRefreshNow(string part, bool forceReload, int attempt, int cancelGen)
+    {
+        if (!ShouldRunRuntimeUiLogic() || string.IsNullOrWhiteSpace(part))
+            return;
+
+        part = part.Trim();
+        MethodInvoker work = delegate
+        {
+            try
+            {
+                if (cancelGen != _alertaCalidadCancelGeneration)
+                    return;
+                if (!string.Equals(_pendingAlertaCalidadPart, part, StringComparison.OrdinalIgnoreCase))
+                    return;
+                if (!IsCurrentJobHeadPart(part))
+                    return;
+
+                AlertaCalidadBaQResult data = LoadAlertasCalidadFromBaQ(part, forceReload || attempt > 0);
+                RememberAlertaCalidadResult(part, data);
+                ApplyAlertaCalidadUi(data, part);
+                _lastAlertaCalidadBaqPart = part;
+            }
+            catch
+            {
+            }
+
+            if (attempt + 1 < MaxAlertaCalidadRefreshAttempts
+                && ResolveAlertaCalidadControl() == null)
+                ScheduleAlertaCalidadControlRetry(part, forceReload, attempt + 1, cancelGen);
+        };
+
+        try
+        {
+            Form host = JobEntryForm;
+            if (host != null && !host.IsDisposed && host.IsHandleCreated)
+                host.BeginInvoke(work);
+            else
+                work();
+        }
+        catch
+        {
+            work();
+        }
+    }
+
+    private void ScheduleAlertaCalidadControlRetry(string part, bool forceReload, int attempt, int cancelGen)
+    {
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed)
+                return;
+
+            Timer retryTimer = new Timer();
+            retryTimer.Interval = Math.Min(40 + (attempt * 40), 200);
+            retryTimer.Tick += delegate(object s, EventArgs ev)
+            {
+                retryTimer.Stop();
+                retryTimer.Dispose();
+                if (cancelGen != _alertaCalidadCancelGeneration)
+                    return;
+                ExecuteAlertaCalidadRefreshNow(part, forceReload, attempt, cancelGen);
+            };
+            retryTimer.Start();
+        }
+        catch
+        {
+        }
+    }
+
+    private void ScheduleAlertaCalidadRepaintWaves(string part, int cancelGen)
+    {
+        if (!ShouldRunRuntimeUiLogic() || string.IsNullOrWhiteSpace(part))
+            return;
+
+        part = part.Trim();
+        int[] delaysMs = new int[] { 50, 150, 300 };
+        try
+        {
+            Form host = JobEntryForm;
+            if (host == null || host.IsDisposed)
+                return;
+
+            for (int i = 0; i < delaysMs.Length; i++)
+            {
+                int delayMs = delaysMs[i];
+                string expectedPart = part;
+                Timer repaintTimer = new Timer();
+                repaintTimer.Interval = delayMs;
+                repaintTimer.Tick += delegate(object s, EventArgs ev)
+                {
+                    repaintTimer.Stop();
+                    repaintTimer.Dispose();
+                    if (cancelGen != _alertaCalidadCancelGeneration)
+                        return;
+                    if (!string.Equals(_pendingAlertaCalidadPart, expectedPart, StringComparison.OrdinalIgnoreCase))
+                        return;
+                    if (!IsCurrentJobHeadPart(expectedPart))
+                        return;
+
+                    try
+                    {
+                        if (_lastAlertaCalidadResult != null
+                            && string.Equals(_lastAlertaCalidadResultPart, expectedPart, StringComparison.OrdinalIgnoreCase))
+                            ApplyAlertaCalidadUi(_lastAlertaCalidadResult, expectedPart);
+                        else
+                            TryApplyAlertaCalidadInstant(expectedPart);
+                    }
+                    catch
+                    {
+                    }
+                };
+                repaintTimer.Start();
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void ScheduleDebouncedNewJobPartLoad(string part)
+    {
+        if (!ShouldRunRuntimeUiLogic() || !IsNewJobContext())
+            return;
+
+        if (string.IsNullOrWhiteSpace(part))
+            return;
+
+        _newJobPartLoadPending = part.Trim();
+
+        try
+        {
+            if (_newJobPartLoadTimer == null)
+            {
+                _newJobPartLoadTimer = new Timer();
+                _newJobPartLoadTimer.Tick += NewJobPartLoadTimer_Tick;
+            }
+
+            _newJobPartLoadTimer.Stop();
+            _newJobPartLoadTimer.Interval = NewJobPartLoadDebounceMs;
+            _newJobPartLoadTimer.Start();
+        }
+        catch
+        {
+        }
+    }
+
+    private void NewJobPartLoadTimer_Tick(object sender, EventArgs e)
+    {
+        try
+        {
+            if (_newJobPartLoadTimer != null)
+                _newJobPartLoadTimer.Stop();
+        }
+        catch
+        {
+        }
+
+        string part = _newJobPartLoadPending;
+        if (string.IsNullOrWhiteSpace(part) || !IsNewJobContext())
+            return;
+
+        ExecuteNewJobPartSideEffects(part, false);
+    }
+
+    private void FlushDebouncedNewJobPartLoad(string part, bool forceReloadAlerta)
+    {
+        try
+        {
+            if (_newJobPartLoadTimer != null)
+                _newJobPartLoadTimer.Stop();
+        }
+        catch
+        {
+        }
+
+        if (string.IsNullOrWhiteSpace(part) || !IsNewJobContext())
+            return;
+
+        ExecuteNewJobPartSideEffects(part.Trim(), forceReloadAlerta);
+    }
+
+    private void ExecuteNewJobPartSideEffects(string part, bool forceReloadAlerta)
+    {
+        if (!ShouldRunRuntimeUiLogic() || !IsNewJobContext())
+            return;
+
+        if (!IsCurrentJobHeadPart(part))
+            return;
+
+        string loadKey = "\x1e" + part.Trim();
+        if (string.Equals(_lastDeferredJobLoadKey, loadKey, StringComparison.Ordinal))
+        {
+            if (forceReloadAlerta)
+                ScheduleAlertaCalidadLoad(part, true);
+            return;
+        }
+
+        _lastDeferredJobLoadKey = loadKey;
+
+        try
+        {
+            estatus(edvJobHead, part);
+        }
+        catch (Exception ex)
+        {
+            ExceptionBox.Show(ex);
+        }
+
+        try { validacionmuestraparte(part); } catch { }
+        try { TryPopulateOrdenCompraFromOv(edvJobHead, edvJobHead.Row); } catch { }
+        try { coonsultavlidacion(part); } catch { }
+
+        string currentPlant = ((Ice.Core.Session)oTrans.Session).PlantID;
+        if (currentPlant == MoqPlantId)
+        {
+            try { VALIDARMOQJOB(part); } catch { }
+        }
+
+        ScheduleAlertaCalidadLoad(part, forceReloadAlerta);
+    }
+
     private Control ResolveValidacionParteControl()
     {
         try
@@ -3708,6 +4767,74 @@ public class Script
         }
     }
 
+    private void WirePartColumnChanged()
+    {
+        try
+        {
+            if (_partColumnChangedWired || edvPart == null || edvPart.dataView == null || edvPart.dataView.Table == null)
+                return;
+
+            edvPart.dataView.Table.ColumnChanged -= Part_Table_ColumnChanged;
+            edvPart.dataView.Table.ColumnChanged += Part_Table_ColumnChanged;
+            _partColumnChangedWired = true;
+        }
+        catch
+        {
+        }
+    }
+
+    private void Part_Table_ColumnChanged(object sender, DataColumnChangeEventArgs e)
+    {
+        try
+        {
+            if (edvPart == null || edvPart.Row < 0 || e.Row == null || e.Column == null)
+                return;
+            if (!IsAlertaCalidadPartFieldColumn(e.Column.ColumnName))
+                return;
+
+            DataRowView currentRowView = edvPart.dataView[edvPart.Row];
+            if (currentRowView == null || e.Row != currentRowView.Row)
+                return;
+            if (edvJobHead == null || edvJobHead.Row < 0 || IsNewJobContext())
+                return;
+
+            string part = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+            if (string.IsNullOrWhiteSpace(part))
+                return;
+
+            AlertaCalidadBaQResult fromPart;
+            if (TryGetAlertaCalidadFromPartDataView(part, out fromPart))
+            {
+                JobEntryBaqCache.SetAlertaCalidad(part, fromPart);
+                RememberAlertaCalidadResult(part, fromPart);
+                ApplyAlertaCalidadUi(fromPart, part);
+            }
+            else
+                ScheduleAlertaCalidadLoad(part, true);
+        }
+        catch
+        {
+        }
+    }
+
+    private void JobEntryForm_Activated(object sender, EventArgs e)
+    {
+        try
+        {
+            if (!ShouldRunRuntimeUiLogic() || edvJobHead == null || edvJobHead.Row < 0 || IsNewJobContext())
+                return;
+
+            string part = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+            if (string.IsNullOrWhiteSpace(part))
+                return;
+
+            TryApplyAlertaCalidadInstant(part.Trim());
+        }
+        catch
+        {
+        }
+    }
+
     private void edvPart_EpiViewNotification(EpiDataView view, EpiNotifyArgs args)
     {
         if (args.Row <= -1)
@@ -3718,18 +4845,23 @@ public class Script
             && args.NotifyType != EpiTransaction.NotifyType.AddRow)
             return;
 
+        WirePartColumnChanged();
+
         if (edvJobHead == null || edvJobHead.Row < 0)
             return;
 
-        string part = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
-        if (string.IsNullOrWhiteSpace(part))
+        string headPart = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+        if (string.IsNullOrWhiteSpace(headPart))
             return;
 
-        JobEntryBaqCache.InvalidateValidacionParte(part);
-        ScheduleRefreshValidacionParte(part, 0);
-
         if (IsNewJobContext())
+        {
             ScheduleApplyPrioridadDefaultForNewJob(0);
+            return;
+        }
+
+        JobEntryBaqCache.InvalidateValidacionParte(headPart);
+        ScheduleRefreshValidacionParte(headPart, 0);
     }
 
     private void oTrans_jobAdapter_BeforeAdapterMethod(object sender, BeforeAdapterMethodArgs args)
@@ -3744,6 +4876,16 @@ public class Script
             _ftWatchExpectedJob = string.Empty;
             _ftConsultInFlightJob = string.Empty;
             _lastDeferredJobLoadKey = string.Empty;
+            _alertaCalidadCancelGeneration++;
+            _pendingAlertaCalidadPart = string.Empty;
+            _lastAlertaCalidadAppliedPart = string.Empty;
+            _lastAlertaCalidadResultPart = string.Empty;
+            _lastAlertaCalidadResult = null;
+            _lastAlertaCalidadBaqPart = string.Empty;
+            _alertaCalidadLoadPending = string.Empty;
+            _alertaCalidadLoadForceReload = false;
+            try { if (_alertaCalidadLoadTimer != null) _alertaCalidadLoadTimer.Stop(); } catch { }
+            try { HideAlertaCalidadUi(); } catch { }
         }
 
         switch (args.MethodName)
@@ -4453,14 +5595,15 @@ public class Script
 
             ScheduleApplyHiddenJobEntryFields(0);
 
-            if (isJobLoad)
+            string alertPart = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
+            if (!string.IsNullOrWhiteSpace(alertPart) && !IsNewJobContext())
             {
-                string part = SafeDataViewString(edvJobHead, edvJobHead.Row, "PartNum");
-                if (!string.IsNullOrWhiteSpace(part))
+                if (isJobLoad)
                 {
-                    JobEntryBaqCache.InvalidateValidacionParte(part);
-                    ScheduleRefreshValidacionParte(part, 1);
+                    JobEntryBaqCache.InvalidateValidacionParte(alertPart);
+                    ScheduleRefreshValidacionParte(alertPart, 1);
                 }
+                ScheduleAlertaCalidadLoad(alertPart.Trim(), true);
             }
         }
         catch
@@ -4476,11 +5619,10 @@ public class Script
         string part = SafeDataViewString(view, row, "PartNum");
         string jobNum = SafeDataViewString(view, row, "JobNum");
         string key = jobNum + "\x1e" + part;
-        if (!string.IsNullOrWhiteSpace(jobNum)
-            && string.Equals(_lastDeferredJobLoadKey, key, StringComparison.Ordinal))
+        if (string.Equals(_lastDeferredJobLoadKey, key, StringComparison.Ordinal))
             return;
 
-        _pendingDeferredJobKey = key + "\x1e" + row.ToString(CultureInfo.InvariantCulture);
+        _pendingDeferredJobKey = key;
         _pendingDeferredRow = row;
 
         try
@@ -4531,9 +5673,17 @@ public class Script
         string part = SafeDataViewString(view, row, "PartNum");
         string jobnum = SafeDataViewString(view, row, "JobNum");
         string loadKey = jobnum + "\x1e" + part;
-        if (!string.IsNullOrWhiteSpace(jobnum)
-            && string.Equals(_lastDeferredJobLoadKey, loadKey, StringComparison.Ordinal))
+        if (string.Equals(_lastDeferredJobLoadKey, loadKey, StringComparison.Ordinal))
             return;
+
+        if (IsNewJobContext())
+        {
+            if (!string.IsNullOrWhiteSpace(part))
+                ScheduleDebouncedNewJobPartLoad(part);
+            ScheduleApplyPrioridadDefaultForNewJob(0);
+            ScheduleApplyHiddenJobEntryFields(0);
+            return;
+        }
 
         _lastDeferredJobLoadKey = loadKey;
         SuppressFtClearDuringJobLoad();
@@ -4554,14 +5704,38 @@ public class Script
         try { coonsultavlidacion(part); } catch { }
         try { VALIDARMOQJOB(part); } catch { }
 
-        if (IsNewJobContext())
-            ScheduleApplyPrioridadDefaultForNewJob(0);
-
         ScheduleApplyHiddenJobEntryFields(0);
     }
 
+private void LimpiarAtrasoSiCambioJob(EpiDataView view, int row)
+{
+    string job = row > -1 ? (SafeDataViewString(view, row, "JobNum") ?? string.Empty).Trim() : string.Empty;
+    if (_atrasoJobNum != null && string.Equals(job, _atrasoJobNum, StringComparison.OrdinalIgnoreCase))
+        return;
+    _atrasoJobNum = job;
+    LimpiarAtraso();
+}
+private void LimpiarAtraso()
+{
+    try
+    {
+        // Solo controles sin EpiBinding: si están ligados a un campo de JobHead, Epicor ya muestra el valor del job nuevo.
+        EpiCheckBox chk = csm.GetNativeControlReference(AtrasoCheckEpGuid) as EpiCheckBox;
+        if (chk != null && string.IsNullOrEmpty(chk.EpiBinding))
+            chk.Checked = false;
+        EpiTextBox txt = csm.GetNativeControlReference(MotivoAtrasoEpGuid) as EpiTextBox;
+        if (txt != null && string.IsNullOrEmpty(txt.EpiBinding))
+            txt.Text = string.Empty;
+    }
+    catch
+    {
+    }
+}
+
+
     private void edvJobHead_EpiViewNotification(EpiDataView view, EpiNotifyArgs args)
     {
+            LimpiarAtrasoSiCambioJob(view, args.Row);
         if (args.Row <= -1)
             return;
 
@@ -4574,10 +5748,16 @@ public class Script
             if (string.IsNullOrWhiteSpace(initJobNum))
             {
                 ResetFtCorridaForNewJob();
+                ClearAlertaCalidadUi();
                 ScheduleApplyPrioridadDefaultForNewJob(0);
             }
             else
+            {
                 RequestFtConsultForJob(initJobNum);
+                string initPart = SafeDataViewString(view, args.Row, "PartNum");
+                if (!string.IsNullOrWhiteSpace(initPart))
+                    TryApplyAlertaCalidadInstant(initPart.Trim());
+            }
 
             WireJobHeadColumnChanged();
             WireJobProdColumnChanged();
@@ -4592,7 +5772,10 @@ public class Script
 
         if (args.NotifyType == EpiTransaction.NotifyType.AddRow)
         {
+            _lastDeferredJobLoadKey = string.Empty;
+            _newJobPartLoadPending = string.Empty;
             ResetFtCorridaForNewJob();
+            ClearAlertaCalidadUi();
             _prioridadControl = null;
             _cmbPrioridad = null;
             SetPrioridadDefaultOnRow(view, args.Row);
@@ -4603,6 +5786,8 @@ public class Script
         if (args.NotifyType == EpiTransaction.NotifyType.InitLastView)
         {
             _lastDeferredJobLoadKey = string.Empty;
+            if (!IsNewJobContext())
+                RefreshAlertaCalidadForCurrentJob(view, args.Row);
             TryPopulateOrdenCompraFromOv(view, args.Row);
             WireJobProdColumnChanged();
             WireQuantityLeaveEvents();
@@ -4631,6 +5816,15 @@ public class Script
     }
 }
 
+public sealed class AlertaCalidadBaQResult
+{
+    public string Alerta = string.Empty;
+    public string Vigencia = string.Empty;
+    public DateTime? VigenciaDate;
+    public bool HasData;
+    public bool IsExpired;
+}
+
 public static class JobEntryBaqCache
 {
     private static readonly Dictionary<string, string> EstatusByPart = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -4641,6 +5835,8 @@ public static class JobEntryBaqCache
     private static readonly Dictionary<string, decimal> FtPerMillByPart = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Ud10CacheEntry> Ud10ByPart =
         new Dictionary<string, Ud10CacheEntry>(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, AlertaCalidadBaQResult> AlertaCalidadByPart =
+        new Dictionary<string, AlertaCalidadBaQResult>(StringComparer.OrdinalIgnoreCase);
 
     private static string NormalizeKey(string value)
     {
@@ -4769,6 +5965,33 @@ public static class JobEntryBaqCache
         entry.LabelsPerRoll = labelsPerRoll;
         entry.SalidaInsp = salidaInsp == null ? string.Empty : salidaInsp;
         Ud10ByPart[partNum] = entry;
+    }
+
+    public static bool TryGetAlertaCalidad(string partNum, out AlertaCalidadBaQResult value)
+    {
+        partNum = NormalizeKey(partNum);
+        if (partNum.Length == 0)
+        {
+            value = null;
+            return false;
+        }
+        return AlertaCalidadByPart.TryGetValue(partNum, out value);
+    }
+
+    public static void SetAlertaCalidad(string partNum, AlertaCalidadBaQResult value)
+    {
+        partNum = NormalizeKey(partNum);
+        if (partNum.Length == 0)
+            return;
+        AlertaCalidadByPart[partNum] = value ?? new AlertaCalidadBaQResult();
+    }
+
+    public static void InvalidateAlertaCalidad(string partNum)
+    {
+        partNum = NormalizeKey(partNum);
+        if (partNum.Length == 0)
+            return;
+        AlertaCalidadByPart.Remove(partNum);
     }
 
     private sealed class Ud10CacheEntry
