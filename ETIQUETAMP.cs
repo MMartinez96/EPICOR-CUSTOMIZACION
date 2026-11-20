@@ -977,6 +977,7 @@ public class Script
 				}
 			}
 
+
 			private void Alineacion(int x, int y)
 			{
 				for (int dy = -2; dy <= 2; dy++)
